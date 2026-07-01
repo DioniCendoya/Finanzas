@@ -1,0 +1,1203 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+<title>Mis Finanzas</title>
+<meta name="apple-mobile-web-app-capable" content="yes" />
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+<meta name="apple-mobile-web-app-title" content="Finanzas" />
+<link rel="apple-touch-icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'%3E%3Crect width='100' height='100' rx='22' fill='%230f172a'/%3E%3Ctext x='50' y='64' font-size='52' text-anchor='middle' fill='white' font-family='-apple-system,Helvetica,Arial'%3E%24%3C/text%3E%3C/svg%3E" />
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js" crossorigin></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.24.7/babel.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<style>
+  html, body { margin: 0; background: #f8fafc; }
+  * { -webkit-tap-highlight-color: transparent; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- ============================================================ -->
+<!-- 1) CONFIGURACIÓN DE FIREBASE                                   -->
+<!-- Reemplazá el objeto de abajo con el que te da la consola de   -->
+<!-- Firebase (Configuración del proyecto > Tus apps > Config).    -->
+<!-- ============================================================ -->
+<script type="module">
+  import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-app.js";
+  import {
+    getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut,
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-auth.js";
+  import {
+    initializeFirestore, persistentLocalCache, persistentMultipleTabManager,
+    collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, writeBatch,
+  } from "https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore.js";
+
+  // <<< PEGÁ ACÁ TU CONFIG DE FIREBASE >>>
+  const firebaseConfig = {
+  apiKey: "AIzaSyBXmMHP6Go6FfUb_PfQifeT_kQ_9-IYG9Q",
+  authDomain: "finanzas-compartidas-b6a16.firebaseapp.com",
+  databaseURL: "https://finanzas-compartidas-b6a16-default-rtdb.firebaseio.com",
+  projectId: "finanzas-compartidas-b6a16",
+  storageBucket: "finanzas-compartidas-b6a16.firebasestorage.app",
+  messagingSenderId: "774198343853",
+  appId: "1:774198343853:web:c0a65b4858a3d4d8592e24"
+};
+
+  const app = initializeApp(firebaseConfig);
+  const db = initializeFirestore(app, {
+    localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
+  });
+  const auth = getAuth(app);
+
+  window.__fb = {
+    db, auth, onAuthStateChanged, signInWithEmailAndPassword, signOut,
+    collection, addDoc, updateDoc, deleteDoc, doc, onSnapshot, writeBatch,
+  };
+  window.dispatchEvent(new Event("fb-ready"));
+</script>
+
+<!-- ============================================================ -->
+<!-- 2) APP                                                         -->
+<!-- ============================================================ -->
+<script type="text/babel" data-presets="react">
+const { useState, useEffect, useMemo, useRef } = React;
+
+const TIPO = { INGRESO: "ingreso", GASTO: "gasto", TRANSFERENCIA: "transferencia" };
+const COLORS = ["#0f172a","#334155","#64748b","#94a3b8","#0ea5e9","#6366f1","#a855f7","#ec4899","#f97316","#eab308","#22c55e","#14b8a6"];
+
+function uid(p) { return `${p}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`; }
+function todayStr() { return new Date().toISOString().slice(0, 10); }
+function formatMoney(n) {
+  const num = Number(n) || 0;
+  return num.toLocaleString("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 2 });
+}
+function round2(n) { return Math.round((Number(n) + Number.EPSILON) * 100) / 100; }
+
+function getPeriodRange(preset, customStart, customEnd) {
+  const now = new Date();
+  const y = now.getFullYear(), m = now.getMonth();
+  const fmt = (d) => d.toISOString().slice(0, 10);
+  if (preset === "mes_actual") return { start: fmt(new Date(y, m, 1)), end: fmt(new Date(y, m + 1, 0)) };
+  if (preset === "mes_pasado") return { start: fmt(new Date(y, m - 1, 1)), end: fmt(new Date(y, m, 0)) };
+  if (preset === "ultimos_3") return { start: fmt(new Date(y, m - 2, 1)), end: fmt(new Date(y, m + 1, 0)) };
+  if (preset === "anio_actual") return { start: fmt(new Date(y, 0, 1)), end: fmt(new Date(y, 11, 31)) };
+  return { start: customStart || fmt(new Date(y, m, 1)), end: customEnd || fmt(now) };
+}
+
+function Icon({ name, size = 15, className = "" }) {
+  const paths = {
+    plus: <path d="M12 5v14M5 12h14" />,
+    trash: <path d="M3 6h18M8 6V4a2 2 0 012-2h4a2 2 0 012 2v2m3 0-1 14a2 2 0 01-2 2H8a2 2 0 01-2-2L5 6h14z" />,
+    swap: <path d="M17 3l4 4-4 4M3 7h18M7 21l-4-4 4-4M21 17H3" />,
+    up: <path d="M12 19V5M5 12l7-7 7 7" />,
+    down: <path d="M12 5v14M5 12l7 7 7-7" />,
+    star: <path d="M12 2l3.09 6.26L22 9.27l-5 4.87L18.18 21 12 17.77 5.82 21 7 14.14l-5-4.87 6.91-1.01z" />,
+    users: <path d="M17 21v-2a4 4 0 00-4-4H5a4 4 0 00-4 4v2M9 11a4 4 0 100-8 4 4 0 000 8zM23 21v-2a4 4 0 00-3-3.87M16 3.13a4 4 0 010 7.75" />,
+    x: <path d="M18 6 6 18M6 6l12 12" />,
+    wallet: <path d="M21 12V7H5a2 2 0 010-4h14v4M3 5v14a2 2 0 002 2h16v-5M18 12a2 2 0 000 4h4v-4h-4z" />,
+    cloudOff: <path d="M22.61 16.95A5 5 0 0018 10h-1.26a8 8 0 00-7.05-6M5 5 1 1M1 1l22 22M9.88 4.12A8 8 0 003.2 12c0 .3.03.58.07.87M6.35 18H16a5 5 0 001.19-.14" />,
+    cloudSync: <path d="M20 16.58A5 5 0 0018 7h-1.26A8 8 0 104 15.25M12 12v6m0 0 3-3m-3 3-3-3" />,
+    logout: <path d="M9 21H5a2 2 0 01-2-2V5a2 2 0 012-2h4M16 17l5-5-5-5M21 12H9" />,
+    scale: <path d="M12 3v18M5 8l-3 6a4 4 0 008 0l-3-6zm14 0l-3 6a4 4 0 008 0l-3-6zM5 8h4M15 8h4M9 3h6" />,
+    chart: <path d="M3 3v18h18M8 17V9m5 8V5m5 12v-6" />,
+  };
+  return (
+    <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
+      strokeLinecap="round" strokeLinejoin="round" className={className}>
+      {paths[name]}
+    </svg>
+  );
+}
+
+function useCollection(fb, name, ready) {
+  const [items, setItems] = useState([]);
+  const [pending, setPending] = useState(false);
+  useEffect(() => {
+    if (!ready) return;
+    const unsub = fb.onSnapshot(
+      fb.collection(fb.db, name),
+      { includeMetadataChanges: true },
+      (snap) => {
+        setItems(snap.docs.map((d) => ({ id: d.id, ...d.data() })));
+        setPending(snap.docs.some((d) => d.metadata.hasPendingWrites));
+      },
+      (err) => console.error(`onSnapshot ${name}`, err)
+    );
+    return () => unsub();
+  }, [ready]);
+  return [items, pending];
+}
+
+function PieChartCard({ title, data, onSelectSlice }) {
+  const canvasRef = useRef(null);
+  const chartRef = useRef(null);
+  useEffect(() => {
+    if (!canvasRef.current || !window.Chart) return;
+    if (chartRef.current) chartRef.current.destroy();
+    if (!data.length) return;
+    const ctx = canvasRef.current.getContext("2d");
+    chartRef.current = new Chart(ctx, {
+      type: "pie",
+      data: {
+        labels: data.map((d) => d.label),
+        datasets: [{ data: data.map((d) => d.value), backgroundColor: data.map((_, i) => COLORS[i % COLORS.length]) }],
+      },
+      options: {
+        plugins: { legend: { position: "bottom", labels: { boxWidth: 11, font: { size: 11 } } } },
+        onClick: (evt, elements) => { if (elements.length && onSelectSlice) onSelectSlice(data[elements[0].index].id); },
+      },
+    });
+    return () => { if (chartRef.current) chartRef.current.destroy(); };
+  }, [data]);
+
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-4">
+      <div className="text-sm font-medium mb-3">{title}</div>
+      {data.length ? (
+        <div className="max-w-[280px] mx-auto"><canvas ref={canvasRef}></canvas></div>
+      ) : (
+        <p className="text-sm text-slate-400">Sin datos en este período.</p>
+      )}
+    </div>
+  );
+}
+
+function LoginScreen({ fb }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+    try {
+      await fb.signInWithEmailAndPassword(fb.auth, email.trim(), password);
+    } catch (err) {
+      setError("No se pudo iniciar sesión. Revisá el email y la contraseña.");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 flex items-center justify-center px-4">
+      <form onSubmit={handleLogin} className="w-full max-w-sm rounded-lg border border-slate-200 bg-white p-6 space-y-4">
+        <div className="flex items-center gap-2 text-lg font-semibold text-slate-900">
+          <Icon name="wallet" size={20} />
+          Mis finanzas
+        </div>
+        {error && <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-md px-3 py-2">{error}</div>}
+        <div>
+          <label className="block text-xs font-medium text-slate-500 mb-1">Email</label>
+          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required
+            className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
+        </div>
+        <div>
+          <label className="block text-xs font-medium text-slate-500 mb-1">Contraseña</label>
+          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} required
+            className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
+        </div>
+        <button type="submit" disabled={loading}
+          className="w-full rounded-md bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-800 disabled:opacity-50">
+          {loading ? "Entrando..." : "Entrar"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function FinanceApp({ fb }) {
+  const [personas, pendingPersonas] = useCollection(fb, "personas", true);
+  const [accounts, pendingAccounts] = useCollection(fb, "cuentas", true);
+  const [categories, pendingCategories] = useCollection(fb, "categorias", true);
+  const [transactions, pendingTx] = useCollection(fb, "transacciones", true);
+  const [liquidaciones, pendingLiq] = useCollection(fb, "liquidaciones", true);
+  const hasPending = pendingPersonas || pendingAccounts || pendingCategories || pendingTx || pendingLiq;
+
+  const [online, setOnline] = useState(navigator.onLine);
+  useEffect(() => {
+    const on = () => setOnline(true);
+    const off = () => setOnline(false);
+    window.addEventListener("online", on);
+    window.addEventListener("offline", off);
+    return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); };
+  }, []);
+
+  const [tab, setTab] = useState("resumen");
+  const [error, setError] = useState("");
+  const [filterAccount, setFilterAccount] = useState("todas");
+
+  const [tType, setTType] = useState(TIPO.GASTO);
+  const [tAccount, setTAccount] = useState("");
+  const [tToAccount, setTToAccount] = useState("");
+  const [tCategory, setTCategory] = useState("");
+  const [tAmount, setTAmount] = useState("");
+  const [tDesc, setTDesc] = useState("");
+  const [tDate, setTDate] = useState(todayStr());
+  useEffect(() => { if (!tAccount && accounts.length) setTAccount(accounts[0].id); }, [accounts]);
+
+  const [cAmount, setCAmount] = useState("");
+  const [cCategory, setCCategory] = useState("");
+  const [cDesc, setCDesc] = useState("");
+  const [cDate, setCDate] = useState(todayStr());
+  const [cProps, setCProps] = useState({});
+  const [cPagadoPor, setCPagadoPor] = useState("");
+  useEffect(() => {
+    setCProps((prev) => {
+      const next = { ...prev };
+      personas.forEach((p) => { if (!(p.id in next)) next[p.id] = p.porcentajeDefault ?? 0; });
+      return next;
+    });
+    if (!cPagadoPor && personas.length) setCPagadoPor(personas[0].id);
+  }, [personas]);
+
+  const [newAccName, setNewAccName] = useState("");
+  const [newAccPersona, setNewAccPersona] = useState("");
+  const [newAccBalance, setNewAccBalance] = useState("");
+  const [newAccTipo, setNewAccTipo] = useState("Banco/Efectivo");
+  useEffect(() => { if (!newAccPersona && personas.length) setNewAccPersona(personas[0].id); }, [personas]);
+
+  const [newPersonaName, setNewPersonaName] = useState("");
+  const [newCatName, setNewCatName] = useState("");
+  const [newCatType, setNewCatType] = useState(TIPO.GASTO);
+
+  // ---- métricas ----
+  const [metricsPreset, setMetricsPreset] = useState("mes_actual");
+  const [metricsStart, setMetricsStart] = useState("");
+  const [metricsEnd, setMetricsEnd] = useState("");
+  const [metricsPersona, setMetricsPersona] = useState("todos");
+  const [selGasto, setSelGasto] = useState(null);
+  const [selIngreso, setSelIngreso] = useState(null);
+  const periodo = useMemo(() => getPeriodRange(metricsPreset, metricsStart, metricsEnd), [metricsPreset, metricsStart, metricsEnd]);
+  useEffect(() => { setSelGasto(null); setSelIngreso(null); }, [periodo.start, periodo.end, metricsPersona]);
+
+  function accountPersonaId(cuentaId) { return accounts.find((a) => a.id === cuentaId)?.personaId; }
+  function personaName(id) { return personas.find((p) => p.id === id)?.nombre || "—"; }
+
+  const balances = useMemo(() => {
+    const b = {};
+    accounts.forEach((a) => (b[a.id] = Number(a.saldoInicial) || 0));
+    transactions.forEach((t) => {
+      const amt = Number(t.monto) || 0;
+      if (t.tipo === TIPO.INGRESO) b[t.cuentaId] = (b[t.cuentaId] || 0) + amt;
+      else if (t.tipo === TIPO.GASTO) b[t.cuentaId] = (b[t.cuentaId] || 0) - amt;
+      else if (t.tipo === TIPO.TRANSFERENCIA) {
+        b[t.cuentaId] = (b[t.cuentaId] || 0) - amt;
+        b[t.cuentaDestinoId] = (b[t.cuentaDestinoId] || 0) + amt;
+      }
+    });
+    return b;
+  }, [accounts, transactions]);
+
+  const totalGeneral = useMemo(() => Object.values(balances).reduce((s, v) => s + v, 0), [balances]);
+  function personaSubtotal(personaId) {
+    return accounts.filter((a) => a.personaId === personaId).reduce((s, a) => s + (balances[a.id] || 0), 0);
+  }
+  function accountName(id) { return accounts.find((a) => a.id === id)?.nombre || "—"; }
+  function accountPersona(id) { return personaName(accountPersonaId(id)); }
+  function categoryName(id) { return categories.find((c) => c.id === id)?.nombre || "—"; }
+  function personaPrincipalAccount(personaId) { return accounts.find((a) => a.personaId === personaId && a.esPrincipal); }
+  const categoriasFiltradas = useMemo(
+    () => categories.filter((c) => c.tipo === (tType === TIPO.TRANSFERENCIA ? "__none__" : tType)),
+    [categories, tType]
+  );
+
+  // ---------- movimiento ----------
+  async function handleAddTransaction(e) {
+    e.preventDefault();
+    setError("");
+    const amt = Number(tAmount);
+    if (!tAccount) return setError("Elegí una cuenta.");
+    if (!amt || amt <= 0) return setError("El monto tiene que ser mayor a cero.");
+    if (tType === TIPO.TRANSFERENCIA) {
+      if (!tToAccount) return setError("Elegí a qué cuenta transferís.");
+      if (tToAccount === tAccount) return setError("Origen y destino no pueden ser la misma cuenta.");
+    } else if (!tCategory) return setError("Elegí una subcategoría.");
+    try {
+      await fb.addDoc(fb.collection(fb.db, "transacciones"), {
+        tipo: tType, cuentaId: tAccount,
+        cuentaDestinoId: tType === TIPO.TRANSFERENCIA ? tToAccount : null,
+        categoriaId: tType === TIPO.TRANSFERENCIA ? null : tCategory,
+        monto: amt, descripcion: tDesc.trim(), fecha: tDate || todayStr(),
+        creadoEnMs: Date.now(),
+      });
+      setTAmount(""); setTDesc(""); setTDate(todayStr()); setTCategory("");
+    } catch { setError("No se pudo guardar (quedó pendiente si estás sin conexión)."); }
+  }
+
+  // ---------- gasto compartido ----------
+  async function handleAddSharedExpense(e) {
+    e.preventDefault();
+    setError("");
+    const total = Number(cAmount);
+    if (!total || total <= 0) return setError("El monto total tiene que ser mayor a cero.");
+    if (!cCategory) return setError("Elegí una subcategoría.");
+    if (!cPagadoPor) return setError("Elegí quién pagó.");
+    const suma = personas.reduce((s, p) => s + (Number(cProps[p.id]) || 0), 0);
+    if (Math.abs(suma - 100) > 0.5) return setError(`Los porcentajes suman ${suma}%, tienen que sumar 100%.`);
+    for (const p of personas) {
+      const prop = Number(cProps[p.id]) || 0;
+      if (prop > 0 && !personaPrincipalAccount(p.id)) return setError(`${p.nombre} no tiene cuenta principal.`);
+    }
+    const compartidoId = uid("shared");
+    const activos = personas.filter((p) => (Number(cProps[p.id]) || 0) > 0);
+    let acumulado = 0;
+    try {
+      for (let idx = 0; idx < activos.length; idx++) {
+        const p = activos[idx];
+        const prop = Number(cProps[p.id]) || 0;
+        let monto = idx === activos.length - 1 ? round2(total - acumulado) : round2((total * prop) / 100);
+        acumulado = round2(acumulado + monto);
+        const cuenta = personaPrincipalAccount(p.id);
+        await fb.addDoc(fb.collection(fb.db, "transacciones"), {
+          tipo: TIPO.GASTO, cuentaId: cuenta.id, cuentaDestinoId: null,
+          categoriaId: cCategory, monto, descripcion: cDesc.trim(), fecha: cDate || todayStr(),
+          compartidoId, compartidoTotal: total, compartidoPorcentaje: prop, pagadoPor: cPagadoPor,
+          creadoEnMs: Date.now(),
+        });
+      }
+      setCAmount(""); setCDesc(""); setCDate(todayStr()); setCCategory("");
+    } catch { setError("No se pudo guardar (quedó pendiente si estás sin conexión)."); }
+  }
+
+  // ---------- cuentas ----------
+  async function handleAddAccount(e) {
+    e.preventDefault();
+    setError("");
+    if (!newAccName.trim()) return setError("Ponele un nombre a la cuenta.");
+    if (!newAccPersona) return setError("Elegí de quién es la cuenta.");
+    const yaTienePrincipal = accounts.some((a) => a.personaId === newAccPersona && a.esPrincipal);
+    try {
+      await fb.addDoc(fb.collection(fb.db, "cuentas"), {
+        nombre: newAccName.trim(), personaId: newAccPersona,
+        esPrincipal: !yaTienePrincipal, saldoInicial: Number(newAccBalance) || 0,
+        tipo: newAccTipo.trim() || "Banco/Efectivo",
+      });
+      setNewAccName(""); setNewAccBalance("");
+    } catch { setError("No se pudo guardar (quedó pendiente si estás sin conexión)."); }
+  }
+
+  async function handleSetPrincipal(id, personaId) {
+    const batch = fb.writeBatch(fb.db);
+    accounts.filter((a) => a.personaId === personaId).forEach((a) => {
+      batch.update(fb.doc(fb.db, "cuentas", a.id), { esPrincipal: a.id === id });
+    });
+    try { await batch.commit(); } catch { setError("No se pudo actualizar (quedó pendiente si estás sin conexión)."); }
+  }
+
+  async function handleDeleteAccount(id) {
+    const enUso = transactions.some((t) => t.cuentaId === id || t.cuentaDestinoId === id);
+    if (enUso) return setError("No se puede borrar: tiene movimientos asociados.");
+    try { await fb.deleteDoc(fb.doc(fb.db, "cuentas", id)); } catch { setError("No se pudo borrar."); }
+  }
+
+  // ---------- personas ----------
+  async function handleAddPersona(e) {
+    e.preventDefault();
+    setError("");
+    if (!newPersonaName.trim()) return setError("Ponele un nombre.");
+    try {
+      await fb.addDoc(fb.collection(fb.db, "personas"), { nombre: newPersonaName.trim(), porcentajeDefault: 0 });
+      setNewPersonaName("");
+    } catch { setError("No se pudo guardar (quedó pendiente si estás sin conexión)."); }
+  }
+  async function handleDeletePersona(id) {
+    const enUso = accounts.some((a) => a.personaId === id);
+    if (enUso) return setError("No se puede borrar: esta persona tiene cuentas asociadas.");
+    try { await fb.deleteDoc(fb.doc(fb.db, "personas", id)); } catch { setError("No se pudo borrar."); }
+  }
+  async function handlePersonaDefaultChange(id, val) {
+    try { await fb.updateDoc(fb.doc(fb.db, "personas", id), { porcentajeDefault: Number(val) || 0 }); } catch {}
+  }
+  async function handleRenamePersona(id, val) {
+    try { await fb.updateDoc(fb.doc(fb.db, "personas", id), { nombre: val }); } catch {}
+  }
+
+  // ---------- categorías ----------
+  async function handleAddCategory(e) {
+    e.preventDefault();
+    setError("");
+    if (!newCatName.trim()) return setError("Ponele un nombre a la categoría.");
+    try {
+      await fb.addDoc(fb.collection(fb.db, "categorias"), { nombre: newCatName.trim(), tipo: newCatType });
+      setNewCatName("");
+    } catch { setError("No se pudo guardar (quedó pendiente si estás sin conexión)."); }
+  }
+  async function handleDeleteCategory(id) {
+    const enUso = transactions.some((t) => t.categoriaId === id);
+    if (enUso) return setError("No se puede borrar: tiene movimientos asociados.");
+    try { await fb.deleteDoc(fb.doc(fb.db, "categorias", id)); } catch { setError("No se pudo borrar."); }
+  }
+
+  async function handleDeleteTransaction(id) {
+    const tx = transactions.find((t) => t.id === id);
+    try {
+      if (tx && tx.compartidoId) {
+        const batch = fb.writeBatch(fb.db);
+        transactions.filter((t) => t.compartidoId === tx.compartidoId).forEach((t) => {
+          batch.delete(fb.doc(fb.db, "transacciones", t.id));
+        });
+        await batch.commit();
+      } else {
+        await fb.deleteDoc(fb.doc(fb.db, "transacciones", id));
+      }
+    } catch { setError("No se pudo borrar."); }
+  }
+
+  const transaccionesFiltradas = useMemo(() => {
+    let list = [...transactions];
+    if (filterAccount !== "todas") list = list.filter((t) => t.cuentaId === filterAccount || t.cuentaDestinoId === filterAccount);
+    return list.sort((a, b) => (a.fecha < b.fecha ? 1 : a.fecha > b.fecha ? -1 : 0));
+  }, [transactions, filterAccount]);
+
+  const sumaCProps = personas.reduce((s, p) => s + (Number(cProps[p.id]) || 0), 0);
+  const sumaPersonaDefaults = personas.reduce((s, p) => s + (Number(p.porcentajeDefault) || 0), 0);
+
+  // ---------- métricas: cálculos ----------
+  const txsPeriodo = useMemo(() => transactions.filter((t) =>
+    t.tipo !== TIPO.TRANSFERENCIA && t.fecha >= periodo.start && t.fecha <= periodo.end &&
+    (metricsPersona === "todos" || accountPersonaId(t.cuentaId) === metricsPersona)
+  ), [transactions, periodo, metricsPersona, accounts]);
+
+  function agruparPorCategoria(lista, tipo) {
+    const map = {};
+    lista.filter((t) => t.tipo === tipo).forEach((t) => {
+      const key = t.categoriaId || "sin_categoria";
+      if (!map[key]) map[key] = { id: key, label: categoryName(t.categoriaId) || "Sin categoría", value: 0, items: [] };
+      map[key].value = round2(map[key].value + Number(t.monto));
+      map[key].items.push(t);
+    });
+    return Object.values(map).sort((a, b) => b.value - a.value);
+  }
+  const gastosPorCategoria = useMemo(() => agruparPorCategoria(txsPeriodo, TIPO.GASTO), [txsPeriodo, categories]);
+  const ingresosPorCategoria = useMemo(() => agruparPorCategoria(txsPeriodo, TIPO.INGRESO), [txsPeriodo, categories]);
+  const detalleGasto = gastosPorCategoria.find((c) => c.id === selGasto);
+  const detalleIngreso = ingresosPorCategoria.find((c) => c.id === selIngreso);
+
+  function computeAhorro(personaId) {
+    const cuentasPersona = accounts.filter((a) => a.personaId === personaId && !a.esPrincipal);
+    let total = 0;
+    const porTipo = {};
+    cuentasPersona.forEach((a) => {
+      let delta = 0;
+      transactions.forEach((t) => {
+        if (t.fecha < periodo.start || t.fecha > periodo.end) return;
+        if (t.tipo === TIPO.INGRESO && t.cuentaId === a.id) delta += Number(t.monto);
+        else if (t.tipo === TIPO.GASTO && t.cuentaId === a.id) delta -= Number(t.monto);
+        else if (t.tipo === TIPO.TRANSFERENCIA) {
+          if (t.cuentaId === a.id) delta -= Number(t.monto);
+          if (t.cuentaDestinoId === a.id) delta += Number(t.monto);
+        }
+      });
+      delta = round2(delta);
+      total = round2(total + delta);
+      const tipo = a.tipo || "Sin tipo";
+      porTipo[tipo] = round2((porTipo[tipo] || 0) + delta);
+    });
+    const ingresosPersona = round2(
+      transactions.filter((t) => t.tipo === TIPO.INGRESO && t.fecha >= periodo.start && t.fecha <= periodo.end && accountPersonaId(t.cuentaId) === personaId)
+        .reduce((s, t) => s + Number(t.monto), 0)
+    );
+    return { total, porTipo, ingresosPersona, pct: ingresosPersona > 0 ? round2((total / ingresosPersona) * 100) : null };
+  }
+  const personasParaAhorro = metricsPersona === "todos" ? personas : personas.filter((p) => p.id === metricsPersona);
+
+  // ---------- deudas ----------
+  const ultimaLiquidacion = useMemo(() => {
+    if (!liquidaciones.length) return null;
+    return liquidaciones.slice().sort((a, b) => (b.creadoEnMs || 0) - (a.creadoEnMs || 0))[0];
+  }, [liquidaciones]);
+
+  const gruposPendientes = useMemo(() => {
+    const cutoff = ultimaLiquidacion?.creadoEnMs || 0;
+    const relevant = transactions.filter((t) => t.compartidoId && (t.creadoEnMs || 0) > cutoff);
+    const groups = {};
+    relevant.forEach((t) => { (groups[t.compartidoId] = groups[t.compartidoId] || []).push(t); });
+    return Object.values(groups).map((g) => ({
+      compartidoId: g[0].compartidoId, fecha: g[0].fecha, descripcion: g[0].descripcion,
+      total: g[0].compartidoTotal, pagadoPor: g[0].pagadoPor, items: g,
+    })).sort((a, b) => (a.fecha < b.fecha ? 1 : -1));
+  }, [transactions, ultimaLiquidacion]);
+
+  const debeA = useMemo(() => {
+    const result = {};
+    gruposPendientes.forEach((g) => {
+      if (!g.pagadoPor) return;
+      g.items.forEach((t) => {
+        const deudor = accountPersonaId(t.cuentaId);
+        if (!deudor || deudor === g.pagadoPor) return;
+        result[deudor] = result[deudor] || {};
+        result[deudor][g.pagadoPor] = round2((result[deudor][g.pagadoPor] || 0) + Number(t.monto));
+      });
+    });
+    return result;
+  }, [gruposPendientes, accounts]);
+
+  const paresDeuda = useMemo(() => {
+    const seen = new Set();
+    const out = [];
+    personas.forEach((p1) => personas.forEach((p2) => {
+      if (p1.id === p2.id) return;
+      const key = [p1.id, p2.id].sort().join("|");
+      if (seen.has(key)) return;
+      seen.add(key);
+      const a = debeA[p1.id]?.[p2.id] || 0;
+      const b = debeA[p2.id]?.[p1.id] || 0;
+      const net = round2(a - b);
+      if (Math.abs(net) < 0.01) return;
+      out.push(net > 0 ? { deudor: p1, acreedor: p2, monto: net } : { deudor: p2, acreedor: p1, monto: -net });
+    }));
+    return out;
+  }, [debeA, personas]);
+
+  async function handleSaldarDeudas() {
+    if (!paresDeuda.length) return;
+    if (!window.confirm("Esto no mueve plata en ninguna cuenta, solo reinicia el conteo de deudas. ¿Confirmás que ya se saldó afuera de la app?")) return;
+    try {
+      await fb.addDoc(fb.collection(fb.db, "liquidaciones"), {
+        creadoEnMs: Date.now(),
+        detalle: paresDeuda.map((p) => ({ deudorId: p.deudor.id, acreedorId: p.acreedor.id, monto: p.monto })),
+      });
+    } catch { setError("No se pudo registrar (quedó pendiente si estás sin conexión)."); }
+  }
+
+  const tabs = [
+    { id: "resumen", label: "Resumen" },
+    { id: "movimiento", label: "Movimiento" },
+    { id: "compartido", label: "Gasto compartido" },
+    { id: "deudas", label: "Deudas" },
+    { id: "metricas", label: "Métricas" },
+    { id: "historial", label: "Historial" },
+    { id: "cuentas", label: "Cuentas" },
+    { id: "personas", label: "Personas" },
+    { id: "categorias", label: "Categorías" },
+  ];
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-900 pb-10">
+      <div className="max-w-3xl mx-auto px-4 py-6">
+        <header className="mb-5 flex items-start justify-between gap-3">
+          <div>
+            <h1 className="text-xl font-semibold flex items-center gap-2">
+              <Icon name="wallet" size={20} className="text-slate-700" />
+              Mis finanzas
+            </h1>
+            <p className="text-sm text-slate-500 mt-1">Sincronizado entre dispositivos.</p>
+          </div>
+          <button onClick={() => fb.signOut(fb.auth)} className="text-slate-400 hover:text-slate-700 shrink-0 mt-1" title="Cerrar sesión">
+            <Icon name="logout" size={18} />
+          </button>
+        </header>
+
+        {!online && (
+          <div className="mb-4 flex items-center gap-2 rounded-md border border-amber-200 bg-amber-50 text-amber-700 text-sm px-3 py-2">
+            <Icon name="cloudOff" size={15} className="shrink-0" />
+            Sin conexión. Lo que cargues se guarda igual y se sincroniza solo cuando vuelva internet.
+          </div>
+        )}
+        {online && hasPending && (
+          <div className="mb-4 flex items-center gap-2 rounded-md border border-blue-200 bg-blue-50 text-blue-700 text-sm px-3 py-2">
+            <Icon name="cloudSync" size={15} className="shrink-0" />
+            Sincronizando cambios pendientes...
+          </div>
+        )}
+        {error && (
+          <div className="mb-4 flex items-start justify-between gap-2 rounded-md border border-red-200 bg-red-50 text-red-700 text-sm px-3 py-2">
+            <span>{error}</span>
+            <button onClick={() => setError("")} className="text-red-400 hover:text-red-600 shrink-0"><Icon name="x" size={14} /></button>
+          </div>
+        )}
+
+        <nav className="flex flex-wrap gap-1 mb-5 border-b border-slate-200 overflow-x-auto">
+          {tabs.map((t) => (
+            <button key={t.id} onClick={() => setTab(t.id)}
+              className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px whitespace-nowrap transition-colors ${
+                tab === t.id ? "border-slate-900 text-slate-900" : "border-transparent text-slate-500 hover:text-slate-700"}`}>
+              {t.label}
+            </button>
+          ))}
+        </nav>
+
+        {tab === "resumen" && (
+          <div className="space-y-4">
+            <div className="rounded-lg border border-slate-200 bg-white p-4">
+              <div className="text-xs uppercase tracking-wide text-slate-500">Total en todas las cuentas</div>
+              <div className="text-2xl font-semibold mt-1">{formatMoney(totalGeneral)}</div>
+            </div>
+
+            {personas.map((p) => (
+              <div key={p.id}>
+                <div className="text-sm font-medium text-slate-700 mb-2 flex items-center justify-between">
+                  <span>{p.nombre}</span>
+                  <span className="text-slate-400 font-normal">{formatMoney(personaSubtotal(p.id))}</span>
+                </div>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  {accounts.filter((a) => a.personaId === p.id).map((a) => (
+                    <div key={a.id} className="rounded-lg border border-slate-200 bg-white p-4">
+                      <div className="flex items-center gap-1.5 font-medium text-sm">
+                        {a.esPrincipal && <Icon name="star" size={13} className="text-amber-500 fill-amber-500" />}
+                        {a.nombre}
+                        {a.tipo && <span className="text-[10px] uppercase tracking-wide bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">{a.tipo}</span>}
+                      </div>
+                      <div className="text-lg font-semibold mt-2">{formatMoney(balances[a.id])}</div>
+                    </div>
+                  ))}
+                  {accounts.filter((a) => a.personaId === p.id).length === 0 && (
+                    <div className="text-xs text-slate-400 sm:col-span-2">Sin cuentas todavía.</div>
+                  )}
+                </div>
+              </div>
+            ))}
+
+            <div>
+              <div className="text-sm font-medium text-slate-700 mb-2">Últimos movimientos</div>
+              <TransactionList items={transactions.slice().sort((a, b) => (a.fecha < b.fecha ? 1 : -1)).slice(0, 6)}
+                accountName={accountName} accountPersona={accountPersona} categoryName={categoryName} onDelete={handleDeleteTransaction} />
+              {transactions.length === 0 && <p className="text-sm text-slate-400">Todavía no cargaste ningún movimiento.</p>}
+            </div>
+          </div>
+        )}
+
+        {tab === "movimiento" && (
+          <form onSubmit={handleAddTransaction} className="rounded-lg border border-slate-200 bg-white p-4 space-y-4">
+            <div className="flex gap-2">
+              {[
+                { id: TIPO.GASTO, label: "Gasto", icon: "down" },
+                { id: TIPO.INGRESO, label: "Ingreso", icon: "up" },
+                { id: TIPO.TRANSFERENCIA, label: "Transferencia", icon: "swap" },
+              ].map(({ id, label, icon }) => (
+                <button type="button" key={id} onClick={() => { setTType(id); setTCategory(""); }}
+                  className={`flex-1 flex items-center justify-center gap-1.5 rounded-md border px-3 py-2 text-sm font-medium ${
+                    tType === id ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 text-slate-600 hover:border-slate-300"}`}>
+                  <Icon name={icon} size={14} />{label}
+                </button>
+              ))}
+            </div>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">{tType === TIPO.TRANSFERENCIA ? "Desde la cuenta" : "Cuenta"}</label>
+                <select value={tAccount} onChange={(e) => setTAccount(e.target.value)} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm">
+                  {personas.map((p) => (
+                    <optgroup key={p.id} label={p.nombre}>
+                      {accounts.filter((a) => a.personaId === p.id).map((a) => <option key={a.id} value={a.id}>{a.nombre}</option>)}
+                    </optgroup>
+                  ))}
+                </select>
+              </div>
+
+              {tType === TIPO.TRANSFERENCIA ? (
+                <div>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">Hacia la cuenta</label>
+                  <select value={tToAccount} onChange={(e) => setTToAccount(e.target.value)} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm">
+                    <option value="">Elegir...</option>
+                    {personas.map((p) => (
+                      <optgroup key={p.id} label={p.nombre}>
+                        {accounts.filter((a) => a.personaId === p.id && a.id !== tAccount).map((a) => <option key={a.id} value={a.id}>{a.nombre}</option>)}
+                      </optgroup>
+                    ))}
+                  </select>
+                </div>
+              ) : (
+                <div>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">Subcategoría</label>
+                  <select value={tCategory} onChange={(e) => setTCategory(e.target.value)} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm">
+                    <option value="">Elegir...</option>
+                    {categoriasFiltradas.map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                  </select>
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">Monto</label>
+                <input type="number" step="0.01" min="0" value={tAmount} onChange={(e) => setTAmount(e.target.value)}
+                  placeholder="0.00" className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">Fecha</label>
+                <input type="date" value={tDate} onChange={(e) => setTDate(e.target.value)} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-medium text-slate-500 mb-1">Descripción (opcional)</label>
+                <input type="text" value={tDesc} onChange={(e) => setTDesc(e.target.value)} placeholder="Ej: supermercado, alquiler..."
+                  className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
+              </div>
+            </div>
+
+            <button type="submit" className="w-full sm:w-auto flex items-center justify-center gap-1.5 rounded-md bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-800">
+              <Icon name="plus" size={14} />Guardar movimiento
+            </button>
+          </form>
+        )}
+
+        {tab === "compartido" && (
+          <form onSubmit={handleAddSharedExpense} className="rounded-lg border border-slate-200 bg-white p-4 space-y-4">
+            <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
+              <Icon name="users" size={16} />
+              Nuevo gasto compartido
+            </div>
+            <p className="text-xs text-slate-500 -mt-2">Se carga en la cuenta principal de cada persona, según el porcentaje.</p>
+
+            <div className="grid gap-3 sm:grid-cols-2">
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">Monto total</label>
+                <input type="number" step="0.01" min="0" value={cAmount} onChange={(e) => setCAmount(e.target.value)}
+                  placeholder="0.00" className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">Subcategoría</label>
+                <select value={cCategory} onChange={(e) => setCCategory(e.target.value)} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm">
+                  <option value="">Elegir...</option>
+                  {categories.filter((c) => c.tipo === TIPO.GASTO).map((c) => <option key={c.id} value={c.id}>{c.nombre}</option>)}
+                </select>
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">Fecha</label>
+                <input type="date" value={cDate} onChange={(e) => setCDate(e.target.value)} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
+              </div>
+              <div>
+                <label className="block text-xs font-medium text-slate-500 mb-1">¿Quién pagó?</label>
+                <select value={cPagadoPor} onChange={(e) => setCPagadoPor(e.target.value)} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm">
+                  {personas.map((p) => <option key={p.id} value={p.id}>{p.nombre}</option>)}
+                </select>
+              </div>
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-medium text-slate-500 mb-1">Descripción (opcional)</label>
+                <input type="text" value={cDesc} onChange={(e) => setCDesc(e.target.value)} placeholder="Ej: supermercado del mes"
+                  className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
+              </div>
+            </div>
+
+            <div className="border-t border-slate-100 pt-3">
+              <div className="text-xs font-medium text-slate-500 mb-2">División (por defecto, ajustable para este gasto puntual)</div>
+              <div className="space-y-2">
+                {personas.map((p) => (
+                  <div key={p.id} className="flex items-center gap-3">
+                    <span className="text-sm w-32 truncate">{p.nombre}</span>
+                    <input type="number" min="0" max="100" value={cProps[p.id] ?? 0}
+                      onChange={(e) => setCProps({ ...cProps, [p.id]: e.target.value })}
+                      className="w-20 rounded-md border border-slate-200 px-2 py-1.5 text-sm" />
+                    <span className="text-sm text-slate-400">%</span>
+                    {cAmount && (
+                      <span className="text-xs text-slate-400 ml-auto">
+                        ≈ {formatMoney((Number(cAmount) * (Number(cProps[p.id]) || 0)) / 100)}
+                      </span>
+                    )}
+                  </div>
+                ))}
+              </div>
+              <div className={`text-xs mt-2 ${Math.abs(sumaCProps - 100) > 0.5 ? "text-red-500" : "text-slate-400"}`}>
+                Total: {sumaCProps}% {Math.abs(sumaCProps - 100) > 0.5 ? "(tiene que sumar 100%)" : ""}
+              </div>
+            </div>
+
+            <button type="submit" className="w-full sm:w-auto flex items-center justify-center gap-1.5 rounded-md bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-800">
+              <Icon name="plus" size={14} />Registrar gasto compartido
+            </button>
+          </form>
+        )}
+
+        {tab === "deudas" && (
+          <div className="space-y-4">
+            <div className="rounded-lg border border-slate-200 bg-white p-4">
+              <div className="flex items-center gap-2 text-sm font-medium text-slate-700 mb-3">
+                <Icon name="scale" size={16} />
+                Balance de gastos compartidos
+              </div>
+              {paresDeuda.length === 0 ? (
+                <p className="text-sm text-slate-500">No hay deudas pendientes. Todo saldado 🎉</p>
+              ) : (
+                <div className="space-y-2">
+                  {paresDeuda.map((p, i) => (
+                    <div key={i} className="text-sm">
+                      <span className="font-medium">{p.deudor.nombre}</span> le debe a{" "}
+                      <span className="font-medium">{p.acreedor.nombre}</span>:{" "}
+                      <span className="font-semibold">{formatMoney(p.monto)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {paresDeuda.length > 0 && (
+                <button onClick={handleSaldarDeudas}
+                  className="mt-4 flex items-center gap-1.5 rounded-md bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-800">
+                  <Icon name="scale" size={14} />Saldar deudas
+                </button>
+              )}
+              {ultimaLiquidacion && (
+                <p className="text-xs text-slate-400 mt-3">
+                  Última liquidación: {new Date(ultimaLiquidacion.creadoEnMs).toLocaleDateString("es-AR")}
+                </p>
+              )}
+            </div>
+
+            <div>
+              <div className="text-sm font-medium text-slate-700 mb-2">Gastos compartidos desde la última liquidación</div>
+              {gruposPendientes.length === 0 ? (
+                <p className="text-sm text-slate-400">No hay gastos compartidos en este período.</p>
+              ) : (
+                <div className="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
+                  {gruposPendientes.map((g) => (
+                    <div key={g.compartidoId} className="px-4 py-3">
+                      <div className="flex items-center justify-between text-sm">
+                        <span className="font-medium">{g.descripcion || categoryName(g.items[0].categoriaId)}</span>
+                        <span className="font-semibold">{formatMoney(g.total)}</span>
+                      </div>
+                      <div className="text-xs text-slate-400 mt-0.5">
+                        {g.fecha} · Pagó {personaName(g.pagadoPor)} ·{" "}
+                        {g.items.map((it) => `${accountPersona(it.cuentaId)}: ${formatMoney(it.monto)}`).join(" · ")}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {tab === "metricas" && (
+          <div className="space-y-4">
+            <div className="rounded-lg border border-slate-200 bg-white p-4 space-y-3">
+              <div className="flex flex-wrap gap-2">
+                {[
+                  { id: "mes_actual", label: "Este mes" },
+                  { id: "mes_pasado", label: "Mes pasado" },
+                  { id: "ultimos_3", label: "Últimos 3 meses" },
+                  { id: "anio_actual", label: "Año actual" },
+                  { id: "personalizado", label: "Personalizado" },
+                ].map((opt) => (
+                  <button key={opt.id} onClick={() => setMetricsPreset(opt.id)}
+                    className={`px-3 py-1.5 rounded-md text-xs font-medium border ${
+                      metricsPreset === opt.id ? "border-slate-900 bg-slate-900 text-white" : "border-slate-200 text-slate-600"}`}>
+                    {opt.label}
+                  </button>
+                ))}
+              </div>
+              {metricsPreset === "personalizado" && (
+                <div className="flex items-center gap-2">
+                  <input type="date" value={metricsStart} onChange={(e) => setMetricsStart(e.target.value)} className="rounded-md border border-slate-200 px-2 py-1.5 text-sm" />
+                  <span className="text-slate-400 text-sm">a</span>
+                  <input type="date" value={metricsEnd} onChange={(e) => setMetricsEnd(e.target.value)} className="rounded-md border border-slate-200 px-2 py-1.5 text-sm" />
+                </div>
+              )}
+              <div className="flex items-center gap-2">
+                <label className="text-xs font-medium text-slate-500">Persona:</label>
+                <select value={metricsPersona} onChange={(e) => setMetricsPersona(e.target.value)} className="rounded-md border border-slate-200 px-2 py-1.5 text-sm">
+                  <option value="todos">Todos</option>
+                  {personas.map((p) => <option key={p.id} value={p.id}>{p.nombre}</option>)}
+                </select>
+              </div>
+              <div className="text-xs text-slate-400">Período: {periodo.start} a {periodo.end}</div>
+            </div>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              <div>
+                <PieChartCard title="Gastos por categoría" data={gastosPorCategoria} onSelectSlice={setSelGasto} />
+                {detalleGasto && (
+                  <div className="mt-2 rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
+                    <div className="px-4 py-2 text-xs font-medium text-slate-600 flex justify-between">
+                      <span>{detalleGasto.label}</span><span>{formatMoney(detalleGasto.value)}</span>
+                    </div>
+                    {detalleGasto.items.sort((a, b) => (a.fecha < b.fecha ? 1 : -1)).map((t) => (
+                      <div key={t.id} className="px-4 py-2 text-xs flex justify-between text-slate-500">
+                        <span>{t.fecha} {t.descripcion ? `· ${t.descripcion}` : ""} · {accountPersona(t.cuentaId)}</span>
+                        <span>{formatMoney(t.monto)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <div>
+                <PieChartCard title="Ingresos por categoría" data={ingresosPorCategoria} onSelectSlice={setSelIngreso} />
+                {detalleIngreso && (
+                  <div className="mt-2 rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
+                    <div className="px-4 py-2 text-xs font-medium text-slate-600 flex justify-between">
+                      <span>{detalleIngreso.label}</span><span>{formatMoney(detalleIngreso.value)}</span>
+                    </div>
+                    {detalleIngreso.items.sort((a, b) => (a.fecha < b.fecha ? 1 : -1)).map((t) => (
+                      <div key={t.id} className="px-4 py-2 text-xs flex justify-between text-slate-500">
+                        <span>{t.fecha} {t.descripcion ? `· ${t.descripcion}` : ""} · {accountPersona(t.cuentaId)}</span>
+                        <span>{formatMoney(t.monto)}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div>
+              <div className="text-sm font-medium text-slate-700 mb-2 flex items-center gap-1.5">
+                <Icon name="chart" size={15} />Ahorro del período
+              </div>
+              <div className="space-y-3">
+                {personasParaAhorro.map((p) => {
+                  const a = computeAhorro(p.id);
+                  const tipos = Object.entries(a.porTipo);
+                  const maxAbs = Math.max(1, ...tipos.map(([, v]) => Math.abs(v)));
+                  return (
+                    <div key={p.id} className="rounded-lg border border-slate-200 bg-white p-4">
+                      <div className="flex items-center justify-between text-sm font-medium">
+                        <span>{p.nombre}</span>
+                        <span>{formatMoney(a.total)} {a.pct !== null && <span className="text-slate-400 font-normal">({a.pct}% de ingresos)</span>}</span>
+                      </div>
+                      <div className="text-xs text-slate-400 mt-1">Ingresos del período: {formatMoney(a.ingresosPersona)}</div>
+                      {tipos.length > 0 && (
+                        <div className="mt-3 space-y-1.5">
+                          {tipos.map(([tipoNombre, monto]) => (
+                            <div key={tipoNombre} className="flex items-center gap-2 text-xs">
+                              <span className="w-28 truncate text-slate-500">{tipoNombre}</span>
+                              <div className="flex-1 h-2 bg-slate-100 rounded overflow-hidden">
+                                <div className={`h-full ${monto >= 0 ? "bg-emerald-500" : "bg-red-400"}`} style={{ width: `${Math.min(100, (Math.abs(monto) / maxAbs) * 100)}%` }}></div>
+                              </div>
+                              <span className="w-24 text-right font-medium">{formatMoney(monto)}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                      {tipos.length === 0 && <p className="text-xs text-slate-400 mt-2">Sin cuentas de ahorro/inversión todavía.</p>}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {tab === "historial" && (
+          <div className="space-y-3">
+            <div className="flex items-center gap-2">
+              <label className="text-xs font-medium text-slate-500">Cuenta:</label>
+              <select value={filterAccount} onChange={(e) => setFilterAccount(e.target.value)} className="rounded-md border border-slate-200 px-2 py-1.5 text-sm">
+                <option value="todas">Todas</option>
+                {personas.map((p) => (
+                  <optgroup key={p.id} label={p.nombre}>
+                    {accounts.filter((a) => a.personaId === p.id).map((a) => <option key={a.id} value={a.id}>{a.nombre}</option>)}
+                  </optgroup>
+                ))}
+              </select>
+            </div>
+            <TransactionList items={transaccionesFiltradas} accountName={accountName} accountPersona={accountPersona}
+              categoryName={categoryName} onDelete={handleDeleteTransaction} />
+            {transaccionesFiltradas.length === 0 && <p className="text-sm text-slate-400">No hay movimientos para mostrar.</p>}
+          </div>
+        )}
+
+        {tab === "cuentas" && (
+          <div className="space-y-4">
+            <form onSubmit={handleAddAccount} className="rounded-lg border border-slate-200 bg-white p-4 space-y-3">
+              <div className="text-sm font-medium">Nueva cuenta</div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">Nombre</label>
+                  <input type="text" value={newAccName} onChange={(e) => setNewAccName(e.target.value)} placeholder="Ej: Inversiones"
+                    className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">De quién</label>
+                  <select value={newAccPersona} onChange={(e) => setNewAccPersona(e.target.value)} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm">
+                    {personas.map((p) => <option key={p.id} value={p.id}>{p.nombre}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">Tipo (para las métricas de ahorro)</label>
+                  <input type="text" list="tipos-cuenta" value={newAccTipo} onChange={(e) => setNewAccTipo(e.target.value)}
+                    placeholder="Ej: Plazo fijo, Bolsa, Cripto..." className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
+                  <datalist id="tipos-cuenta">
+                    <option value="Banco/Efectivo" /><option value="Plazo fijo" /><option value="Bolsa" /><option value="Cripto" /><option value="Otro" />
+                  </datalist>
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">Saldo inicial</label>
+                  <input type="number" step="0.01" value={newAccBalance} onChange={(e) => setNewAccBalance(e.target.value)} placeholder="0.00"
+                    className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
+                </div>
+              </div>
+              <button type="submit" className="flex items-center gap-1.5 rounded-md bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-800">
+                <Icon name="plus" size={14} />Agregar cuenta
+              </button>
+            </form>
+
+            {personas.map((p) => (
+              <div key={p.id} className="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
+                <div className="px-4 py-2 border-b border-slate-100 text-sm font-medium">{p.nombre}</div>
+                {accounts.filter((a) => a.personaId === p.id).map((a) => (
+                  <div key={a.id} className="flex items-center justify-between px-4 py-3">
+                    <div>
+                      <div className="flex items-center gap-1.5 font-medium text-sm">
+                        {a.esPrincipal && <Icon name="star" size={13} className="text-amber-500 fill-amber-500" />}
+                        {a.nombre}
+                        {a.tipo && <span className="text-[10px] uppercase tracking-wide bg-slate-100 text-slate-500 px-1.5 py-0.5 rounded">{a.tipo}</span>}
+                      </div>
+                      <div className="text-xs text-slate-500">Saldo actual: {formatMoney(balances[a.id])}</div>
+                    </div>
+                    <div className="flex items-center gap-3">
+                      {!a.esPrincipal && (
+                        <button onClick={() => handleSetPrincipal(a.id, p.id)} className="text-xs text-slate-500 hover:text-slate-800 underline">
+                          Marcar principal
+                        </button>
+                      )}
+                      <button onClick={() => handleDeleteAccount(a.id)} className="text-slate-400 hover:text-red-500"><Icon name="trash" size={15} /></button>
+                    </div>
+                  </div>
+                ))}
+                {accounts.filter((a) => a.personaId === p.id).length === 0 && (
+                  <div className="px-4 py-3 text-xs text-slate-400">Sin cuentas todavía.</div>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+
+        {tab === "personas" && (
+          <div className="space-y-4">
+            <form onSubmit={handleAddPersona} className="rounded-lg border border-slate-200 bg-white p-4 space-y-3">
+              <div className="text-sm font-medium">Agregar persona</div>
+              <div className="flex gap-2">
+                <input type="text" value={newPersonaName} onChange={(e) => setNewPersonaName(e.target.value)} placeholder="Nombre"
+                  className="flex-1 rounded-md border border-slate-200 px-3 py-2 text-sm" />
+                <button type="submit" className="flex items-center gap-1.5 rounded-md bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-800">
+                  <Icon name="plus" size={14} />Agregar
+                </button>
+              </div>
+            </form>
+
+            <div className="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
+              {personas.map((p) => (
+                <div key={p.id} className="flex items-center justify-between gap-3 px-4 py-3">
+                  <input type="text" defaultValue={p.nombre} onBlur={(e) => handleRenamePersona(p.id, e.target.value)}
+                    className="text-sm font-medium border-none focus:outline-none focus:ring-1 focus:ring-slate-300 rounded px-1 -mx-1 flex-1" />
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <input type="number" min="0" max="100" defaultValue={p.porcentajeDefault}
+                      onBlur={(e) => handlePersonaDefaultChange(p.id, e.target.value)}
+                      className="w-16 rounded-md border border-slate-200 px-2 py-1 text-sm" />
+                    <span className="text-xs text-slate-400">% default</span>
+                  </div>
+                  <button onClick={() => handleDeletePersona(p.id)} className="text-slate-400 hover:text-red-500 shrink-0"><Icon name="trash" size={15} /></button>
+                </div>
+              ))}
+            </div>
+            <p className={`text-xs ${Math.abs(sumaPersonaDefaults - 100) > 0.5 ? "text-red-500" : "text-slate-400"}`}>
+              Suma de porcentajes default: {sumaPersonaDefaults}% {Math.abs(sumaPersonaDefaults - 100) > 0.5 ? "(conviene que sumen 100%)" : ""}
+            </p>
+          </div>
+        )}
+
+        {tab === "categorias" && (
+          <div className="space-y-4">
+            <form onSubmit={handleAddCategory} className="rounded-lg border border-slate-200 bg-white p-4 space-y-3">
+              <div className="text-sm font-medium">Nueva subcategoría</div>
+              <div className="grid gap-3 sm:grid-cols-2">
+                <div>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">Nombre</label>
+                  <input type="text" value={newCatName} onChange={(e) => setNewCatName(e.target.value)} placeholder="Ej: Salidas"
+                    className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
+                </div>
+                <div>
+                  <label className="block text-xs font-medium text-slate-500 mb-1">Tipo</label>
+                  <select value={newCatType} onChange={(e) => setNewCatType(e.target.value)} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm">
+                    <option value={TIPO.GASTO}>Gasto</option>
+                    <option value={TIPO.INGRESO}>Ingreso</option>
+                  </select>
+                </div>
+              </div>
+              <button type="submit" className="flex items-center gap-1.5 rounded-md bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-800">
+                <Icon name="plus" size={14} />Agregar categoría
+              </button>
+            </form>
+
+            <div className="grid gap-4 sm:grid-cols-2">
+              {[TIPO.GASTO, TIPO.INGRESO].map((tipo) => (
+                <div key={tipo} className="rounded-lg border border-slate-200 bg-white">
+                  <div className="px-4 py-2 border-b border-slate-100 text-sm font-medium">{tipo === TIPO.GASTO ? "Gastos" : "Ingresos"}</div>
+                  <div className="divide-y divide-slate-100">
+                    {categories.filter((c) => c.tipo === tipo).map((c) => (
+                      <div key={c.id} className="flex items-center justify-between px-4 py-2 text-sm">
+                        <span>{c.nombre}</span>
+                        <button onClick={() => handleDeleteCategory(c.id)} className="text-slate-400 hover:text-red-500"><Icon name="trash" size={14} /></button>
+                      </div>
+                    ))}
+                    {categories.filter((c) => c.tipo === tipo).length === 0 && <div className="px-4 py-3 text-xs text-slate-400">Sin categorías todavía.</div>}
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function TransactionList({ items, accountName, accountPersona, categoryName, onDelete }) {
+  if (!items.length) return null;
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
+      {items.map((t) => (
+        <div key={t.id} className="flex items-center justify-between px-4 py-2.5">
+          <div className="min-w-0">
+            <div className="flex items-center gap-2 text-sm">
+              <span className={`inline-flex items-center justify-center w-5 h-5 rounded-full shrink-0 ${
+                t.tipo === TIPO.INGRESO ? "bg-emerald-100 text-emerald-600" : t.tipo === TIPO.GASTO ? "bg-red-100 text-red-600" : "bg-slate-100 text-slate-600"}`}>
+                <Icon name={t.tipo === TIPO.INGRESO ? "up" : t.tipo === TIPO.GASTO ? "down" : "swap"} size={11} />
+              </span>
+              <span className="font-medium truncate">
+                {t.tipo === TIPO.TRANSFERENCIA
+                  ? `${accountName(t.cuentaId)} → ${accountName(t.cuentaDestinoId)}`
+                  : `${accountPersona(t.cuentaId)} · ${categoryName(t.categoriaId)}`}
+              </span>
+              {t.compartidoId && (
+                <span className="text-[10px] uppercase tracking-wide bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded shrink-0">
+                  Compartido {t.compartidoPorcentaje}%
+                </span>
+              )}
+            </div>
+            <div className="text-xs text-slate-400 mt-0.5 ml-7">
+              {t.fecha} {t.descripcion ? `· ${t.descripcion}` : ""}
+              {t.compartidoId ? ` · total ${formatMoney(t.compartidoTotal)}` : ""}
+            </div>
+          </div>
+          <div className="flex items-center gap-3 shrink-0">
+            <span className={`text-sm font-semibold ${t.tipo === TIPO.INGRESO ? "text-emerald-600" : t.tipo === TIPO.GASTO ? "text-red-600" : "text-slate-700"}`}>
+              {t.tipo === TIPO.GASTO ? "-" : t.tipo === TIPO.INGRESO ? "+" : ""}{formatMoney(t.monto)}
+            </span>
+            <button onClick={() => onDelete(t.id)} className="text-slate-300 hover:text-red-500"><Icon name="trash" size={14} /></button>
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function Root() {
+  const [fb, setFb] = useState(window.__fb || null);
+  const [user, setUser] = useState(undefined);
+
+  useEffect(() => {
+    if (fb) return;
+    const handler = () => setFb(window.__fb);
+    window.addEventListener("fb-ready", handler);
+    return () => window.removeEventListener("fb-ready", handler);
+  }, [fb]);
+
+  useEffect(() => {
+    if (!fb) return;
+    const unsub = fb.onAuthStateChanged(fb.auth, (u) => setUser(u || null));
+    return () => unsub();
+  }, [fb]);
+
+  if (!fb || user === undefined) {
+    return <div className="min-h-screen flex items-center justify-center text-slate-400 text-sm">Cargando...</div>;
+  }
+  if (!user) return <LoginScreen fb={fb} />;
+  return <FinanceApp fb={fb} />;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<Root />);
+</script>
+</body>
+</html>
