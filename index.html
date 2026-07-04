@@ -165,6 +165,43 @@ function PieChartCard({ title, data, onSelectSlice }) {
   );
 }
 
+function LineChartCard({ title, labels, datasets, empty, yFormatter }) {
+  const canvasRef = useRef(null);
+  const chartRef = useRef(null);
+  useEffect(() => {
+    if (!canvasRef.current || !window.Chart) return;
+    if (chartRef.current) chartRef.current.destroy();
+    if (empty) return;
+    const ctx = canvasRef.current.getContext("2d");
+    chartRef.current = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: datasets.map((d, i) => ({
+          label: d.label, data: d.data, borderColor: COLORS[i % COLORS.length],
+          backgroundColor: COLORS[i % COLORS.length], tension: 0.25, pointRadius: 2, spanGaps: true,
+        })),
+      },
+      options: {
+        interaction: { mode: "index", intersect: false },
+        plugins: { legend: { position: "bottom", labels: { boxWidth: 11, font: { size: 11 } } } },
+        scales: {
+          y: { ticks: { callback: (v) => (yFormatter ? yFormatter(v) : v), font: { size: 10 } } },
+          x: { ticks: { font: { size: 10 }, maxRotation: 45, minRotation: 0 } },
+        },
+      },
+    });
+    return () => { if (chartRef.current) chartRef.current.destroy(); };
+  }, [labels, datasets, empty]);
+
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-4">
+      <div className="text-sm font-medium mb-3">{title}</div>
+      {empty ? <p className="text-sm text-slate-400">Sin datos suficientes todavía.</p> : <div className="h-64"><canvas ref={canvasRef}></canvas></div>}
+    </div>
+  );
+}
+
 function LoginScreen({ fb }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -300,6 +337,59 @@ function TransactionList({ items, accountName, personaName, categoryName, onDele
   );
 }
 
+// Envoltorio que detecta swipe horizontal (touch) para moverse entre las
+// "ventanas" de una misma categoría, con indicadores clicleables como respaldo.
+function SwipeViews({ views, activeId, onChange, children }) {
+  const startX = useRef(null);
+  const startY = useRef(null);
+  const dragging = useRef(false);
+  const activeIndex = Math.max(0, views.findIndex((v) => v.id === activeId));
+
+  function onTouchStart(e) {
+    startX.current = e.touches[0].clientX;
+    startY.current = e.touches[0].clientY;
+    dragging.current = true;
+  }
+  function onTouchEnd(e) {
+    if (!dragging.current || startX.current == null) return;
+    dragging.current = false;
+    const dx = e.changedTouches[0].clientX - startX.current;
+    const dy = e.changedTouches[0].clientY - startY.current;
+    const THRESHOLD = 45;
+    if (Math.abs(dx) > THRESHOLD && Math.abs(dx) > Math.abs(dy)) {
+      if (dx < 0 && activeIndex < views.length - 1) onChange(views[activeIndex + 1].id);
+      else if (dx > 0 && activeIndex > 0) onChange(views[activeIndex - 1].id);
+    }
+    startX.current = null;
+  }
+
+  return (
+    <div>
+      {views.length > 1 && (
+        <div className="flex items-center justify-center gap-3 mb-4 flex-wrap">
+          {views.map((v) => (
+            <button key={v.id} onClick={() => onChange(v.id)}
+              className={`flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-full transition-colors ${
+                v.id === activeId ? "bg-slate-900 text-white" : "text-slate-400 hover:text-slate-600"}`}>
+              {v.label}
+            </button>
+          ))}
+        </div>
+      )}
+      <div onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
+        {children}
+      </div>
+      {views.length > 1 && (
+        <div className="flex items-center justify-center gap-1.5 mt-4">
+          {views.map((v) => (
+            <span key={v.id} className={`h-1.5 rounded-full transition-all ${v.id === activeId ? "w-5 bg-slate-900" : "w-1.5 bg-slate-300"}`} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function FinanceApp({ fb, uid, personas, miNombre }) {
   const misCuentasQ = useLiveQuery(fb, () => fb.query(fb.collection(fb.db, "cuentas"), fb.where("personaId", "==", uid)), [uid]);
   const principalesQ = useLiveQuery(fb, () => fb.query(fb.collection(fb.db, "cuentas"), fb.where("esPrincipal", "==", true)), []);
@@ -324,6 +414,8 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
   }, []);
 
   const [tab, setTab] = useState("resumen");
+  const [category, setCategory] = useState("metricas");
+  const [lastSubtab, setLastSubtab] = useState({ metricas: "resumen", movimiento: "movimiento", gestion: "cuentas" });
   const [error, setError] = useState("");
   const [filterAccount, setFilterAccount] = useState("todas");
 
@@ -587,6 +679,62 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
     return { total, porTipo, ingresosPeriodo, pct: ingresosPeriodo > 0 ? round2((total / ingresosPeriodo) * 100) : null };
   }, [misCuentas, misTransacciones, periodo]);
 
+  // ---------- análisis mensual (gastos e ingresos por mes) ----------
+  const analisisMensual = useMemo(() => {
+    const map = {};
+    misTransacciones.forEach((t) => {
+      if (t.tipo !== TIPO.GASTO && t.tipo !== TIPO.INGRESO) return;
+      const mes = (t.fecha || "").slice(0, 7);
+      if (!mes) return;
+      if (!map[mes]) map[mes] = { mes, gasto: 0, ingreso: 0 };
+      map[mes][t.tipo === TIPO.GASTO ? "gasto" : "ingreso"] = round2(map[mes][t.tipo === TIPO.GASTO ? "gasto" : "ingreso"] + Number(t.monto));
+    });
+    return Object.values(map).sort((a, b) => (a.mes < b.mes ? -1 : 1));
+  }, [misTransacciones]);
+
+  // ---------- rendimiento de inversiones (cuentas no principales) ----------
+  const inversiones = useMemo(() => {
+    const cuentasInv = misCuentas.filter((a) => !a.esPrincipal);
+    const series = cuentasInv.map((a) => {
+      const movs = misTransacciones
+        .filter((t) => t.cuentaId === a.id || t.cuentaDestinoId === a.id)
+        .slice()
+        .sort((x, y) => (x.fecha < y.fecha ? -1 : 1));
+      let saldo = Number(a.saldoInicial) || 0;
+      const puntos = [{ fecha: "inicio", saldo }];
+      movs.forEach((t) => {
+        if (t.tipo === TIPO.INGRESO && t.cuentaId === a.id) saldo += Number(t.monto);
+        else if (t.tipo === TIPO.GASTO && t.cuentaId === a.id) saldo -= Number(t.monto);
+        else if (t.tipo === TIPO.TRANSFERENCIA) {
+          if (t.cuentaId === a.id) saldo -= Number(t.monto);
+          if (t.cuentaDestinoId === a.id) saldo += Number(t.monto);
+        }
+        saldo = round2(saldo);
+        puntos.push({ fecha: t.fecha, saldo });
+      });
+      const inicial = Number(a.saldoInicial) || 0;
+      const actual = balances[a.id] || 0;
+      const gananciaNeta = round2(actual - inicial);
+      const rendimientoPct = inicial > 0 ? round2((gananciaNeta / inicial) * 100) : null;
+      return { id: a.id, nombre: a.nombre, tipo: a.tipo, inicial, actual, gananciaNeta, rendimientoPct, puntos };
+    });
+    const fechasSet = new Set(["inicio"]);
+    series.forEach((s) => s.puntos.forEach((p) => fechasSet.add(p.fecha)));
+    const fechas = Array.from(fechasSet).sort((a, b) => (a === "inicio" ? -1 : b === "inicio" ? 1 : a < b ? -1 : 1));
+    const seriesAlineadas = series.map((s) => {
+      const porFecha = {};
+      s.puntos.forEach((p) => { porFecha[p.fecha] = p.saldo; });
+      let ultimo = s.inicial;
+      const valores = fechas.map((f) => {
+        if (f in porFecha) ultimo = porFecha[f];
+        return ultimo;
+      });
+      const pctValores = valores.map((v) => (s.inicial > 0 ? round2(((v - s.inicial) / s.inicial) * 100) : null));
+      return { ...s, valores, pctValores };
+    });
+    return { cuentas: seriesAlineadas, fechas };
+  }, [misCuentas, misTransacciones, balances]);
+
   // ---------- deudas ----------
   const ultimaLiquidacion = useMemo(() => {
     if (!liquidaciones.length) return null;
@@ -648,17 +796,35 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
 
   const miDeuda = paresDeuda.find((p) => p.deudorId === uid || p.acreedorId === uid);
 
-  const tabs = [
-    { id: "resumen", label: "Resumen" },
-    { id: "movimiento", label: "Movimiento" },
-    { id: "compartido", label: "Gasto compartido" },
-    { id: "deudas", label: "Deudas" },
-    { id: "metricas", label: "Métricas" },
-    { id: "historial", label: "Historial" },
-    { id: "cuentas", label: "Cuentas" },
-    { id: "categorias", label: "Categorías" },
-    { id: "perfil", label: "Perfil" },
+  const CATEGORIES = [
+    { id: "metricas", label: "Métricas", subtabs: [
+      { id: "metricas", label: "General" },
+      { id: "mensual", label: "Por mes" },
+      { id: "inversiones", label: "Inversiones" },
+      { id: "resumen", label: "Resumen" },
+      { id: "deudas", label: "Deudas" },
+    ] },
+    { id: "movimiento", label: "Movimiento", subtabs: [
+      { id: "movimiento", label: "Nuevo movimiento" },
+      { id: "compartido", label: "Gasto compartido" },
+      { id: "historial", label: "Historial" },
+    ] },
+    { id: "gestion", label: "Gestión", subtabs: [
+      { id: "cuentas", label: "Cuentas" },
+      { id: "categorias", label: "Categorías" },
+      { id: "perfil", label: "Perfil" },
+    ] },
   ];
+  const currentCategory = CATEGORIES.find((c) => c.id === category) || CATEGORIES[0];
+
+  function handleSwitchCategory(catId) {
+    setCategory(catId);
+    setTab(lastSubtab[catId] || CATEGORIES.find((c) => c.id === catId).subtabs[0].id);
+  }
+  function handleSwitchSubtab(subId) {
+    setTab(subId);
+    setLastSubtab((prev) => ({ ...prev, [category]: subId }));
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 pb-10">
@@ -688,14 +854,16 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
           </div>
         )}
 
-        <nav className="flex flex-wrap gap-1 mb-5 border-b border-slate-200 overflow-x-auto">
-          {tabs.map((t) => (
-            <button key={t.id} onClick={() => setTab(t.id)}
-              className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px whitespace-nowrap transition-colors ${tab === t.id ? "border-slate-900 text-slate-900" : "border-transparent text-slate-500 hover:text-slate-700"}`}>
-              {t.label}
+        <nav className="flex gap-1 mb-5 border-b border-slate-200">
+          {CATEGORIES.map((c) => (
+            <button key={c.id} onClick={() => handleSwitchCategory(c.id)}
+              className={`flex-1 px-3 py-2 text-sm font-medium border-b-2 -mb-px whitespace-nowrap transition-colors ${category === c.id ? "border-slate-900 text-slate-900" : "border-transparent text-slate-500 hover:text-slate-700"}`}>
+              {c.label}
             </button>
           ))}
         </nav>
+
+        <SwipeViews views={currentCategory.subtabs} activeId={tab} onChange={handleSwitchSubtab}>
 
         {tab === "resumen" && (
           <div className="space-y-4">
@@ -710,7 +878,7 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
                 {miDeuda.deudorId === uid
                   ? <span>Le debés a <b>{personaName(miDeuda.acreedorId)}</b>: <b>{formatMoney(miDeuda.monto)}</b></span>
                   : <span><b>{personaName(miDeuda.deudorId)}</b> te debe: <b>{formatMoney(miDeuda.monto)}</b></span>}
-                {" "}<button onClick={() => setTab("deudas")} className="text-slate-500 underline">Ver</button>
+                {" "}<button onClick={() => handleSwitchSubtab("deudas")} className="text-slate-500 underline">Ver</button>
               </div>
             )}
 
@@ -958,6 +1126,76 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
           </div>
         )}
 
+        {tab === "mensual" && (
+          <div className="space-y-4">
+            <LineChartCard
+              title="Gastos e ingresos por mes"
+              labels={analisisMensual.map((m) => m.mes)}
+              datasets={[
+                { label: "Gastos", data: analisisMensual.map((m) => m.gasto) },
+                { label: "Ingresos", data: analisisMensual.map((m) => m.ingreso) },
+              ]}
+              empty={analisisMensual.length < 2}
+              yFormatter={(v) => formatMoney(v)}
+            />
+            {analisisMensual.length < 2 && (
+              <p className="text-sm text-slate-400">Todavía no hay suficiente historial (se necesitan movimientos de al menos 2 meses distintos) para armar esta comparación.</p>
+            )}
+            {analisisMensual.length >= 2 && (
+              <div className="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
+                {analisisMensual.slice().reverse().map((m) => (
+                  <div key={m.mes} className="flex items-center justify-between px-4 py-2 text-sm">
+                    <span className="text-slate-500">{m.mes}</span>
+                    <span className="text-emerald-600">+{formatMoney(m.ingreso)}</span>
+                    <span className="text-red-600">-{formatMoney(m.gasto)}</span>
+                    <span className="font-medium">{formatMoney(round2(m.ingreso - m.gasto))}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "inversiones" && (
+          <div className="space-y-4">
+            {inversiones.cuentas.length === 0 ? (
+              <p className="text-sm text-slate-400">Todavía no tenés cuentas de inversión/ahorro (cualquier cuenta que no sea tu cuenta principal cuenta acá).</p>
+            ) : (
+              <>
+                <LineChartCard
+                  title="Saldo en el tiempo (monto, $)"
+                  labels={inversiones.fechas.map((f) => (f === "inicio" ? "Inicio" : f))}
+                  datasets={inversiones.cuentas.map((c) => ({ label: c.nombre, data: c.valores }))}
+                  empty={inversiones.fechas.length < 2}
+                  yFormatter={(v) => formatMoney(v)}
+                />
+                <LineChartCard
+                  title="Rendimiento relativo al saldo inicial (%)"
+                  labels={inversiones.fechas.map((f) => (f === "inicio" ? "Inicio" : f))}
+                  datasets={inversiones.cuentas.filter((c) => c.inicial > 0).map((c) => ({ label: c.nombre, data: c.pctValores }))}
+                  empty={inversiones.fechas.length < 2 || inversiones.cuentas.every((c) => c.inicial <= 0)}
+                  yFormatter={(v) => `${v}%`}
+                />
+                <div className="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
+                  <div className="px-4 py-2 text-xs font-medium text-slate-500 flex justify-between">
+                    <span className="w-1/4">Cuenta</span><span className="w-1/4 text-right">Ganancia neta</span><span className="w-1/4 text-right">Rendimiento</span>
+                  </div>
+                  {inversiones.cuentas.map((c) => (
+                    <div key={c.id} className="px-4 py-2.5 text-sm flex justify-between items-center">
+                      <span className="w-1/4 truncate font-medium">{c.nombre}</span>
+                      <span className={`w-1/4 text-right ${c.gananciaNeta >= 0 ? "text-emerald-600" : "text-red-600"}`}>{formatMoney(c.gananciaNeta)}</span>
+                      <span className={`w-1/4 text-right ${c.rendimientoPct === null ? "text-slate-400" : c.rendimientoPct >= 0 ? "text-emerald-600" : "text-red-600"}`}>
+                        {c.rendimientoPct === null ? "— (saldo inicial 0)" : `${c.rendimientoPct}%`}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-xs text-slate-400">"Rendimiento" compara el saldo actual contra el saldo inicial cargado para cada cuenta. No descuenta inflación (monto nominal).</p>
+              </>
+            )}
+          </div>
+        )}
+
         {tab === "historial" && (
           <div className="space-y-3">
             <div className="flex items-center gap-2">
@@ -1066,6 +1304,8 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
             <button type="submit" className="rounded-md bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-800">Guardar</button>
           </form>
         )}
+
+        </SwipeViews>
       </div>
     </div>
   );
