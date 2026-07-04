@@ -69,7 +69,7 @@ const firebaseConfig = {
 const { useState, useEffect, useMemo, useRef } = React;
 
 const TIPO = { INGRESO: "ingreso", GASTO: "gasto", TRANSFERENCIA: "transferencia" };
-const COLORS = ["#0f172a","#334155","#64748b","#94a3b8","#0ea5e9","#6366f1","#a855f7","#ec4899","#f97316","#eab308","#22c55e","#14b8a6"];
+const COLORS = ["#e11d48","#2563eb","#16a34a","#f59e0b","#7c3aed","#0891b2","#db2777","#65a30d","#ea580c","#4338ca","#0d9488","#78716c"];
 
 function uid(p) { return `${p}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`; }
 function todayStr() { return new Date().toISOString().slice(0, 10); }
@@ -693,6 +693,11 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
   }, [misTransacciones]);
 
   // ---------- rendimiento de inversiones (cuentas no principales) ----------
+  // Criterio: las TRANSFERENCIAS hacia/desde la cuenta son aportes o retiros de
+  // capital (no generan rendimiento, solo cambian la base). Los movimientos de
+  // tipo ingreso/gasto cargados directamente en la cuenta representan la
+  // ganancia o pérdida real del período, y se componen entre sí para armar un
+  // índice comparable entre cuentas independientemente de cuánto capital tengan.
   const inversiones = useMemo(() => {
     const cuentasInv = misCuentas.filter((a) => !a.esPrincipal);
     const series = cuentasInv.map((a) => {
@@ -701,35 +706,56 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
         .slice()
         .sort((x, y) => (x.fecha < y.fecha ? -1 : 1));
       let saldo = Number(a.saldoInicial) || 0;
-      const puntos = [{ fecha: "inicio", saldo }];
+      let gananciaAcumulada = 0;
+      let indice = 100;
+      let huboEventoSinBase = false;
+      const puntos = [{ fecha: "inicio", saldo, gananciaAcumulada, indice }];
       movs.forEach((t) => {
-        if (t.tipo === TIPO.INGRESO && t.cuentaId === a.id) saldo += Number(t.monto);
-        else if (t.tipo === TIPO.GASTO && t.cuentaId === a.id) saldo -= Number(t.monto);
-        else if (t.tipo === TIPO.TRANSFERENCIA) {
+        if (t.tipo === TIPO.TRANSFERENCIA) {
+          // Aporte o retiro de capital: mueve el saldo, no es rendimiento.
           if (t.cuentaId === a.id) saldo -= Number(t.monto);
           if (t.cuentaDestinoId === a.id) saldo += Number(t.monto);
+        } else if (t.tipo === TIPO.INGRESO || t.tipo === TIPO.GASTO) {
+          // Ajuste de fin de período: ganancia o pérdida real generada por la inversión.
+          const monto = Number(t.monto) * (t.tipo === TIPO.GASTO ? -1 : 1);
+          const saldoAntes = saldo;
+          saldo += monto;
+          gananciaAcumulada = round2(gananciaAcumulada + monto);
+          if (saldoAntes > 0) indice = round2(indice * (1 + monto / saldoAntes));
+          else huboEventoSinBase = true;
         }
         saldo = round2(saldo);
-        puntos.push({ fecha: t.fecha, saldo });
+        puntos.push({ fecha: t.fecha, saldo, gananciaAcumulada, indice });
       });
       const inicial = Number(a.saldoInicial) || 0;
       const actual = balances[a.id] || 0;
-      const gananciaNeta = round2(actual - inicial);
-      const rendimientoPct = inicial > 0 ? round2((gananciaNeta / inicial) * 100) : null;
-      return { id: a.id, nombre: a.nombre, tipo: a.tipo, inicial, actual, gananciaNeta, rendimientoPct, puntos };
+      const rendimientoPct = round2(indice - 100);
+      const primeraFecha = movs.length ? movs[0].fecha : null;
+      let dias = null, cagr = null;
+      if (primeraFecha) {
+        dias = Math.round((new Date(todayStr()) - new Date(primeraFecha)) / 86400000);
+        if (dias >= 30 && indice > 0) cagr = round2((Math.pow(indice / 100, 365 / dias) - 1) * 100);
+      }
+      return { id: a.id, nombre: a.nombre, tipo: a.tipo, inicial, actual, gananciaNeta: gananciaAcumulada, rendimientoPct, cagr, dias, huboEventoSinBase, puntos };
     });
     const fechasSet = new Set(["inicio"]);
     series.forEach((s) => s.puntos.forEach((p) => fechasSet.add(p.fecha)));
     const fechas = Array.from(fechasSet).sort((a, b) => (a === "inicio" ? -1 : b === "inicio" ? 1 : a < b ? -1 : 1));
     const seriesAlineadas = series.map((s) => {
       const porFecha = {};
-      s.puntos.forEach((p) => { porFecha[p.fecha] = p.saldo; });
-      let ultimo = s.inicial;
-      const valores = fechas.map((f) => {
+      s.puntos.forEach((p) => { porFecha[p.fecha] = p; });
+      let ultimo = s.puntos[0];
+      let empezo = false;
+      const valores = [], pctValores = [];
+      fechas.forEach((f) => {
+        if (!empezo) {
+          if (f !== s.primeraFecha) { valores.push(null); pctValores.push(null); return; }
+          empezo = true;
+        }
         if (f in porFecha) ultimo = porFecha[f];
-        return ultimo;
+        valores.push(ultimo.gananciaAcumulada);
+        pctValores.push(ultimo.indice - 100);
       });
-      const pctValores = valores.map((v) => (s.inicial > 0 ? round2(((v - s.inicial) / s.inicial) * 100) : null));
       return { ...s, valores, pctValores };
     });
     return { cuentas: seriesAlineadas, fechas };
@@ -828,7 +854,7 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 pb-10">
-      <div className="max-w-3xl mx-auto px-4 py-6">
+      <div className="max-w-3xl mx-auto px-4 pb-6" style={{ paddingTop: "max(1.5rem, calc(env(safe-area-inset-top) + 0.9rem))" }}>
         <header className="mb-5 flex items-start justify-between gap-3">
           <div>
             <h1 className="text-xl font-semibold flex items-center gap-2"><Icon name="wallet" size={20} className="text-slate-700" />Mis finanzas</h1>
@@ -1163,34 +1189,37 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
             ) : (
               <>
                 <LineChartCard
-                  title="Saldo en el tiempo (monto, $)"
+                  title="Ganancia/pérdida acumulada (monto, $)"
                   labels={inversiones.fechas.map((f) => (f === "inicio" ? "Inicio" : f))}
                   datasets={inversiones.cuentas.map((c) => ({ label: c.nombre, data: c.valores }))}
                   empty={inversiones.fechas.length < 2}
                   yFormatter={(v) => formatMoney(v)}
                 />
                 <LineChartCard
-                  title="Rendimiento relativo al saldo inicial (%)"
+                  title="Rendimiento compuesto (%)"
                   labels={inversiones.fechas.map((f) => (f === "inicio" ? "Inicio" : f))}
-                  datasets={inversiones.cuentas.filter((c) => c.inicial > 0).map((c) => ({ label: c.nombre, data: c.pctValores }))}
-                  empty={inversiones.fechas.length < 2 || inversiones.cuentas.every((c) => c.inicial <= 0)}
+                  datasets={inversiones.cuentas.map((c) => ({ label: c.nombre, data: c.pctValores }))}
+                  empty={inversiones.fechas.length < 2}
                   yFormatter={(v) => `${v}%`}
                 />
                 <div className="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
                   <div className="px-4 py-2 text-xs font-medium text-slate-500 flex justify-between">
-                    <span className="w-1/4">Cuenta</span><span className="w-1/4 text-right">Ganancia neta</span><span className="w-1/4 text-right">Rendimiento</span>
+                    <span className="w-1/4">Cuenta</span><span className="w-1/4 text-right">Ganancia neta</span><span className="w-1/4 text-right">Total período</span><span className="w-1/4 text-right">Anualizado</span>
                   </div>
                   {inversiones.cuentas.map((c) => (
                     <div key={c.id} className="px-4 py-2.5 text-sm flex justify-between items-center">
                       <span className="w-1/4 truncate font-medium">{c.nombre}</span>
                       <span className={`w-1/4 text-right ${c.gananciaNeta >= 0 ? "text-emerald-600" : "text-red-600"}`}>{formatMoney(c.gananciaNeta)}</span>
-                      <span className={`w-1/4 text-right ${c.rendimientoPct === null ? "text-slate-400" : c.rendimientoPct >= 0 ? "text-emerald-600" : "text-red-600"}`}>
-                        {c.rendimientoPct === null ? "— (saldo inicial 0)" : `${c.rendimientoPct}%`}
-                      </span>
+                      <span className={`w-1/4 text-right ${c.rendimientoPct >= 0 ? "text-emerald-600" : "text-red-600"}`}>{c.rendimientoPct}%</span>
+                      <span className={`w-1/4 text-right ${c.cagr === null ? "text-slate-400" : c.cagr >= 0 ? "text-emerald-600" : "text-red-600"}`}>{c.cagr === null ? "— (poco historial)" : `${c.cagr}%`}</span>
                     </div>
                   ))}
                 </div>
-                <p className="text-xs text-slate-400">"Rendimiento" compara el saldo actual contra el saldo inicial cargado para cada cuenta. No descuenta inflación (monto nominal).</p>
+                <p className="text-xs text-slate-400">"Total período" es el rendimiento compuesto (TWR) desde el primer movimiento. "Anualizado" lo lleva a una tasa equivalente por año (CAGR), para poder comparar cuentas con distinto tiempo de historial; solo se calcula con 30 días de historial o más.</p>
+                {inversiones.cuentas.some((c) => c.huboEventoSinBase) && (
+                  <p className="text-xs text-amber-600">Alguna cuenta tuvo un ajuste de ganancia/pérdida mientras su saldo (antes del ajuste) era 0 o negativo; ese evento se sumó a la ganancia en $, pero se excluyó del cálculo del % compuesto para no distorsionarlo.</p>
+                )}
+                <p className="text-xs text-slate-400">Las transferencias hacia o desde estas cuentas se tratan como aportes/retiros de capital y no cuentan como rendimiento. Solo los movimientos de ingreso/gasto cargados directamente en la cuenta (el ajuste de fin de período) se consideran ganancia o pérdida real. Montos nominales, no ajustados por inflación.</p>
               </>
             )}
           </div>
