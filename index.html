@@ -69,7 +69,7 @@ const firebaseConfig = {
 const { useState, useEffect, useMemo, useRef } = React;
 
 const TIPO = { INGRESO: "ingreso", GASTO: "gasto", TRANSFERENCIA: "transferencia" };
-const COLORS = ["#0f172a","#334155","#64748b","#94a3b8","#0ea5e9","#6366f1","#a855f7","#ec4899","#f97316","#eab308","#22c55e","#14b8a6"];
+const COLORS = ["#e11d48","#2563eb","#16a34a","#f59e0b","#7c3aed","#0891b2","#db2777","#65a30d","#ea580c","#4338ca","#0d9488","#78716c"];
 
 function uid(p) { return `${p}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`; }
 function todayStr() { return new Date().toISOString().slice(0, 10); }
@@ -80,10 +80,9 @@ function formatMoney(n) {
 function round2(n) { return Math.round((Number(n) + Number.EPSILON) * 100) / 100; }
 function genId(p) { return `${p}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`; }
 
-// Simplificación de deudas (algoritmo greedy: empareja al que más debe con el que
-// más le deben). Produce a lo sumo n-1 transferencias. No garantiza el mínimo
-// teórico absoluto (ese problema es NP-difícil), pero para grupos chicos es óptimo
-// en la práctica.
+// Simplificación de deudas (greedy: empareja al que más debe con el que más le
+// deben). A lo sumo n-1 transferencias. El mínimo exacto es NP-difícil; para
+// grupos chicos este resultado es óptimo en la práctica.
 function simplifyDebts(balances) {
   const acreedores = balances.filter((b) => b.net > 0.005).map((b) => ({ id: b.id, val: b.net }));
   const deudores = balances.filter((b) => b.net < -0.005).map((b) => ({ id: b.id, val: -b.net }));
@@ -102,8 +101,7 @@ function simplifyDebts(balances) {
   return txs;
 }
 
-// Dado un evento, calcula cuánto pagó y cuánto consumió cada persona, su balance
-// neto (pagado - consumido) y la liquidación simplificada.
+// Calcula pagado/consumido por persona, balance neto y liquidación de un evento.
 function computeEvento(evento) {
   const porPersona = {};
   (evento.personas || []).forEach((p) => { porPersona[p.id] = { id: p.id, nombre: p.nombre, uid: p.uid || null, pagado: 0, consumido: 0 }; });
@@ -112,8 +110,7 @@ function computeEvento(evento) {
     (g.participantes || []).forEach((pt) => { if (porPersona[pt.pid]) porPersona[pt.pid].consumido = round2(porPersona[pt.pid].consumido + Number(pt.monto)); });
   });
   const balances = Object.values(porPersona).map((v) => ({ ...v, net: round2(v.pagado - v.consumido) }));
-  const liquidacion = simplifyDebts(balances);
-  return { balances, liquidacion };
+  return { balances, liquidacion: simplifyDebts(balances) };
 }
 
 function getPeriodRange(preset, customStart, customEnd) {
@@ -146,7 +143,6 @@ function Icon({ name, size = 15, className = "" }) {
     alert: <path d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />,
     back: <path d="M19 12H5M12 19l-7-7 7-7" />,
     share: <path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8M16 6l-4-4-4 4M12 2v13" />,
-    calendar: <path d="M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" />,
     check: <path d="M20 6 9 17l-5-5" />,
   };
   return (
@@ -202,6 +198,43 @@ function PieChartCard({ title, data, onSelectSlice }) {
     <div className="rounded-lg border border-slate-200 bg-white p-4">
       <div className="text-sm font-medium mb-3">{title}</div>
       {data.length ? <div className="max-w-[280px] mx-auto"><canvas ref={canvasRef}></canvas></div> : <p className="text-sm text-slate-400">Sin datos en este período.</p>}
+    </div>
+  );
+}
+
+function LineChartCard({ title, labels, datasets, empty, yFormatter }) {
+  const canvasRef = useRef(null);
+  const chartRef = useRef(null);
+  useEffect(() => {
+    if (!canvasRef.current || !window.Chart) return;
+    if (chartRef.current) chartRef.current.destroy();
+    if (empty) return;
+    const ctx = canvasRef.current.getContext("2d");
+    chartRef.current = new Chart(ctx, {
+      type: "line",
+      data: {
+        labels,
+        datasets: datasets.map((d, i) => ({
+          label: d.label, data: d.data, borderColor: COLORS[i % COLORS.length],
+          backgroundColor: COLORS[i % COLORS.length], tension: 0.25, pointRadius: 2, spanGaps: true,
+        })),
+      },
+      options: {
+        interaction: { mode: "index", intersect: false },
+        plugins: { legend: { position: "bottom", labels: { boxWidth: 11, font: { size: 11 } } } },
+        scales: {
+          y: { ticks: { callback: (v) => (yFormatter ? yFormatter(v) : v), font: { size: 10 } } },
+          x: { ticks: { font: { size: 10 }, maxRotation: 45, minRotation: 0 } },
+        },
+      },
+    });
+    return () => { if (chartRef.current) chartRef.current.destroy(); };
+  }, [labels, datasets, empty]);
+
+  return (
+    <div className="rounded-lg border border-slate-200 bg-white p-4">
+      <div className="text-sm font-medium mb-3">{title}</div>
+      {empty ? <p className="text-sm text-slate-400">Sin datos suficientes todavía.</p> : <div className="h-64"><canvas ref={canvasRef}></canvas></div>}
     </div>
   );
 }
@@ -341,12 +374,65 @@ function TransactionList({ items, accountName, personaName, categoryName, onDele
   );
 }
 
+// Envoltorio que detecta swipe horizontal (touch) para moverse entre las
+// "ventanas" de una misma categoría, con indicadores clicleables como respaldo.
+function SwipeViews({ views, activeId, onChange, children }) {
+  const startX = useRef(null);
+  const startY = useRef(null);
+  const dragging = useRef(false);
+  const activeIndex = Math.max(0, views.findIndex((v) => v.id === activeId));
+
+  function onTouchStart(e) {
+    startX.current = e.touches[0].clientX;
+    startY.current = e.touches[0].clientY;
+    dragging.current = true;
+  }
+  function onTouchEnd(e) {
+    if (!dragging.current || startX.current == null) return;
+    dragging.current = false;
+    const dx = e.changedTouches[0].clientX - startX.current;
+    const dy = e.changedTouches[0].clientY - startY.current;
+    const THRESHOLD = 45;
+    if (Math.abs(dx) > THRESHOLD && Math.abs(dx) > Math.abs(dy)) {
+      if (dx < 0 && activeIndex < views.length - 1) onChange(views[activeIndex + 1].id);
+      else if (dx > 0 && activeIndex > 0) onChange(views[activeIndex - 1].id);
+    }
+    startX.current = null;
+  }
+
+  return (
+    <div>
+      {views.length > 1 && (
+        <div className="flex items-center justify-center gap-3 mb-4 flex-wrap">
+          {views.map((v) => (
+            <button key={v.id} onClick={() => onChange(v.id)}
+              className={`flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-full transition-colors ${
+                v.id === activeId ? "bg-slate-900 text-white" : "text-slate-400 hover:text-slate-600"}`}>
+              {v.label}
+            </button>
+          ))}
+        </div>
+      )}
+      <div onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
+        {children}
+      </div>
+      {views.length > 1 && (
+        <div className="flex items-center justify-center gap-1.5 mt-4">
+          {views.map((v) => (
+            <span key={v.id} className={`h-1.5 rounded-full transition-all ${v.id === activeId ? "w-5 bg-slate-900" : "w-1.5 bg-slate-300"}`} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ============================ EVENTOS ============================
-// Un evento es una herramienta de reparto autocontenida: sus personas (con o sin
-// app) y sus gastos viven dentro del propio documento del evento. Al finalizar se
-// congela la liquidación y, para cada persona que sí usa la app, se guarda su
-// "share" (lo que consumió). Cada usuario se carga su propio gasto desde su cliente
-// (ver efecto en FinanceApp), así ninguno escribe transacciones del otro.
+// Un evento es una herramienta de reparto autocontenida: personas (con o sin app)
+// y gastos viven dentro del propio documento. Al finalizar se congela la liquidación
+// y se guarda el "share" (lo consumido) de cada usuario de la app. Cada usuario se
+// carga su propio gasto desde su cliente (ver efecto en FinanceApp), así ninguno
+// escribe transacciones del otro.
 
 function EventosSection({ fb, uid, personas, eventos, setError }) {
   const [selId, setSelId] = useState(null);
@@ -433,13 +519,11 @@ function EventoDetalle({ fb, uid, personas, evento, setError, onBack, patchEvent
   const { balances, liquidacion } = useMemo(() => computeEvento(evento), [evento]);
   const nombreDe = (id) => (personasEvento.find((p) => p.id === id)?.nombre || "—");
 
-  // ----- alta de personas -----
   const [extNombre, setExtNombre] = useState("");
   const appDisponibles = personas.filter((p) => !personasEvento.some((pe) => pe.uid === p.id));
 
   function agregarApp(p) {
-    if (finalizado) return;
-    if (personasEvento.some((pe) => pe.uid === p.id)) return;
+    if (finalizado || personasEvento.some((pe) => pe.uid === p.id)) return;
     patchEvento(evento.id, { personas: [...personasEvento, { id: p.id, nombre: p.nombre, uid: p.id }] });
   }
   function agregarExterna(e) {
@@ -454,7 +538,6 @@ function EventoDetalle({ fb, uid, personas, evento, setError, onBack, patchEvent
     patchEvento(evento.id, { personas: personasEvento.filter((p) => p.id !== pid) });
   }
 
-  // ----- alta de gastos -----
   const [gDesc, setGDesc] = useState("");
   const [gMonto, setGMonto] = useState("");
   const [gFecha, setGFecha] = useState(todayStr());
@@ -577,7 +660,6 @@ function EventoDetalle({ fb, uid, personas, evento, setError, onBack, patchEvent
         {finalizado && <p className="text-xs text-slate-400">Finalizado el {evento.finalizadoEnMs ? new Date(evento.finalizadoEnMs).toLocaleDateString("es-AR") : ""}</p>}
       </div>
 
-      {/* Liquidación */}
       <div className="rounded-lg border border-slate-200 bg-white p-4">
         <div className="flex items-center justify-between mb-3">
           <div className="flex items-center gap-2 text-sm font-medium text-slate-700"><Icon name="scale" size={16} />{finalizado ? "Cómo saldar las cuentas" : "Vista previa de la liquidación"}</div>
@@ -597,7 +679,6 @@ function EventoDetalle({ fb, uid, personas, evento, setError, onBack, patchEvent
         )}
       </div>
 
-      {/* Personas */}
       <div className="rounded-lg border border-slate-200 bg-white p-4 space-y-3">
         <div className="flex items-center gap-2 text-sm font-medium text-slate-700"><Icon name="users" size={16} />Personas ({personasEvento.length})</div>
         <div className="flex flex-wrap gap-2">
@@ -627,7 +708,6 @@ function EventoDetalle({ fb, uid, personas, evento, setError, onBack, patchEvent
         )}
       </div>
 
-      {/* Alta de gasto */}
       {!finalizado && personasEvento.length > 0 && (
         <form onSubmit={agregarGasto} className="rounded-lg border border-slate-200 bg-white p-4 space-y-4">
           <div className="text-sm font-medium text-slate-700">Nuevo gasto</div>
@@ -680,7 +760,6 @@ function EventoDetalle({ fb, uid, personas, evento, setError, onBack, patchEvent
         </form>
       )}
 
-      {/* Lista de gastos */}
       <div>
         <div className="text-sm font-medium text-slate-700 mb-2">Gastos del evento ({gastos.length})</div>
         {gastos.length === 0 ? <p className="text-sm text-slate-400">Todavía no cargaste gastos.</p> : (
@@ -703,7 +782,6 @@ function EventoDetalle({ fb, uid, personas, evento, setError, onBack, patchEvent
         )}
       </div>
 
-      {/* Finalizar */}
       {!finalizado && (
         <button onClick={finalizar} disabled={!gastos.length} className="w-full flex items-center justify-center gap-1.5 rounded-md bg-slate-900 text-white px-4 py-2.5 text-sm font-medium hover:bg-slate-800 disabled:opacity-40"><Icon name="check" size={15} />Finalizar evento</button>
       )}
@@ -720,13 +798,13 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
   const liquidacionesQ = useLiveQuery(fb, () => fb.collection(fb.db, "liquidaciones"), []);
   const eventosQ = useLiveQuery(fb, () => fb.collection(fb.db, "eventos"), []);
 
+  const eventos = eventosQ.items;
   const misCuentas = misCuentasQ.items;
   const principalesAjenas = principalesQ.items.filter((a) => a.personaId !== uid);
   const misCategorias = misCategoriasQ.items;
   const misTransacciones = misTxQ.items;
   const compartidas = compartidasQ.items;
   const liquidaciones = liquidacionesQ.items;
-  const eventos = eventosQ.items;
   const hasPending = misCuentasQ.pending || misCategoriasQ.pending || misTxQ.pending || compartidasQ.pending;
 
   const [online, setOnline] = useState(navigator.onLine);
@@ -737,8 +815,8 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
   }, []);
 
   // Auto-carga de la parte propia de eventos finalizados. Cada usuario crea SOLO su
-  // propia transacción (id determinístico => idempotente, nunca duplica), sin tocar
-  // las del otro. Queda sin categoría para que aparezca en el flujo "sin categorizar".
+  // transacción (id determinístico => idempotente: nunca duplica ni pisa la categoría
+  // que ya elegiste). Queda sin categoría, entra al flujo habitual de "sin categorizar".
   const eventoLoadRef = useRef(new Set());
   useEffect(() => {
     if (!eventosQ.loaded || !misTxQ.loaded) return;
@@ -763,6 +841,8 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
   }, [eventos, misTransacciones, misCuentas, eventosQ.loaded, misTxQ.loaded, uid]);
 
   const [tab, setTab] = useState("resumen");
+  const [category, setCategory] = useState("metricas");
+  const [lastSubtab, setLastSubtab] = useState({ metricas: "resumen", movimiento: "movimiento", gestion: "cuentas" });
   const [error, setError] = useState("");
   const [filterAccount, setFilterAccount] = useState("todas");
 
@@ -1026,6 +1106,88 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
     return { total, porTipo, ingresosPeriodo, pct: ingresosPeriodo > 0 ? round2((total / ingresosPeriodo) * 100) : null };
   }, [misCuentas, misTransacciones, periodo]);
 
+  // ---------- análisis mensual (gastos e ingresos por mes) ----------
+  const analisisMensual = useMemo(() => {
+    const map = {};
+    misTransacciones.forEach((t) => {
+      if (t.tipo !== TIPO.GASTO && t.tipo !== TIPO.INGRESO) return;
+      const mes = (t.fecha || "").slice(0, 7);
+      if (!mes) return;
+      if (!map[mes]) map[mes] = { mes, gasto: 0, ingreso: 0 };
+      map[mes][t.tipo === TIPO.GASTO ? "gasto" : "ingreso"] = round2(map[mes][t.tipo === TIPO.GASTO ? "gasto" : "ingreso"] + Number(t.monto));
+    });
+    return Object.values(map).sort((a, b) => (a.mes < b.mes ? -1 : 1));
+  }, [misTransacciones]);
+
+  // ---------- rendimiento de inversiones (cuentas no principales) ----------
+  // Criterio: las TRANSFERENCIAS hacia/desde la cuenta son aportes o retiros de
+  // capital (no generan rendimiento, solo cambian la base). Los movimientos de
+  // tipo ingreso/gasto cargados directamente en la cuenta representan la
+  // ganancia o pérdida real del período, y se componen entre sí para armar un
+  // índice comparable entre cuentas independientemente de cuánto capital tengan.
+  const inversiones = useMemo(() => {
+    const cuentasInv = misCuentas.filter((a) => !a.esPrincipal);
+    const series = cuentasInv.map((a) => {
+      const movs = misTransacciones
+        .filter((t) => t.cuentaId === a.id || t.cuentaDestinoId === a.id)
+        .slice()
+        .sort((x, y) => (x.fecha < y.fecha ? -1 : 1));
+      let saldo = Number(a.saldoInicial) || 0;
+      let gananciaAcumulada = 0;
+      let indice = 100;
+      let huboEventoSinBase = false;
+      const puntos = [{ fecha: "inicio", saldo, gananciaAcumulada, indice }];
+      movs.forEach((t) => {
+        if (t.tipo === TIPO.TRANSFERENCIA) {
+          // Aporte o retiro de capital: mueve el saldo, no es rendimiento.
+          if (t.cuentaId === a.id) saldo -= Number(t.monto);
+          if (t.cuentaDestinoId === a.id) saldo += Number(t.monto);
+        } else if (t.tipo === TIPO.INGRESO || t.tipo === TIPO.GASTO) {
+          // Ajuste de fin de período: ganancia o pérdida real generada por la inversión.
+          const monto = Number(t.monto) * (t.tipo === TIPO.GASTO ? -1 : 1);
+          const saldoAntes = saldo;
+          saldo += monto;
+          gananciaAcumulada = round2(gananciaAcumulada + monto);
+          if (saldoAntes > 0) indice = round2(indice * (1 + monto / saldoAntes));
+          else huboEventoSinBase = true;
+        }
+        saldo = round2(saldo);
+        puntos.push({ fecha: t.fecha, saldo, gananciaAcumulada, indice });
+      });
+      const inicial = Number(a.saldoInicial) || 0;
+      const actual = balances[a.id] || 0;
+      const rendimientoPct = round2(indice - 100);
+      const primeraFecha = movs.length ? movs[0].fecha : null;
+      let dias = null, cagr = null;
+      if (primeraFecha) {
+        dias = Math.round((new Date(todayStr()) - new Date(primeraFecha)) / 86400000);
+        if (dias >= 30 && indice > 0) cagr = round2((Math.pow(indice / 100, 365 / dias) - 1) * 100);
+      }
+      return { id: a.id, nombre: a.nombre, tipo: a.tipo, inicial, actual, gananciaNeta: gananciaAcumulada, rendimientoPct, cagr, dias, huboEventoSinBase, puntos };
+    });
+    const fechasSet = new Set(["inicio"]);
+    series.forEach((s) => s.puntos.forEach((p) => fechasSet.add(p.fecha)));
+    const fechas = Array.from(fechasSet).sort((a, b) => (a === "inicio" ? -1 : b === "inicio" ? 1 : a < b ? -1 : 1));
+    const seriesAlineadas = series.map((s) => {
+      const porFecha = {};
+      s.puntos.forEach((p) => { porFecha[p.fecha] = p; });
+      let ultimo = s.puntos[0];
+      let empezo = false;
+      const valores = [], pctValores = [];
+      fechas.forEach((f) => {
+        if (!empezo) {
+          if (f !== s.primeraFecha) { valores.push(null); pctValores.push(null); return; }
+          empezo = true;
+        }
+        if (f in porFecha) ultimo = porFecha[f];
+        valores.push(ultimo.gananciaAcumulada);
+        pctValores.push(ultimo.indice - 100);
+      });
+      return { ...s, valores, pctValores };
+    });
+    return { cuentas: seriesAlineadas, fechas };
+  }, [misCuentas, misTransacciones, balances]);
+
   // ---------- deudas ----------
   const ultimaLiquidacion = useMemo(() => {
     if (!liquidaciones.length) return null;
@@ -1087,22 +1249,40 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
 
   const miDeuda = paresDeuda.find((p) => p.deudorId === uid || p.acreedorId === uid);
 
-  const tabs = [
-    { id: "resumen", label: "Resumen" },
-    { id: "movimiento", label: "Movimiento" },
-    { id: "compartido", label: "Gasto compartido" },
-    { id: "eventos", label: "Eventos" },
-    { id: "deudas", label: "Deudas" },
-    { id: "metricas", label: "Métricas" },
-    { id: "historial", label: "Historial" },
-    { id: "cuentas", label: "Cuentas" },
-    { id: "categorias", label: "Categorías" },
-    { id: "perfil", label: "Perfil" },
+  const CATEGORIES = [
+    { id: "metricas", label: "Métricas", subtabs: [
+      { id: "metricas", label: "General" },
+      { id: "mensual", label: "Por mes" },
+      { id: "inversiones", label: "Inversiones" },
+      { id: "resumen", label: "Resumen" },
+      { id: "deudas", label: "Deudas" },
+    ] },
+    { id: "movimiento", label: "Movimiento", subtabs: [
+      { id: "movimiento", label: "Nuevo movimiento" },
+      { id: "compartido", label: "Gasto compartido" },
+      { id: "eventos", label: "Eventos" },
+      { id: "historial", label: "Historial" },
+    ] },
+    { id: "gestion", label: "Gestión", subtabs: [
+      { id: "cuentas", label: "Cuentas" },
+      { id: "categorias", label: "Categorías" },
+      { id: "perfil", label: "Perfil" },
+    ] },
   ];
+  const currentCategory = CATEGORIES.find((c) => c.id === category) || CATEGORIES[0];
+
+  function handleSwitchCategory(catId) {
+    setCategory(catId);
+    setTab(lastSubtab[catId] || CATEGORIES.find((c) => c.id === catId).subtabs[0].id);
+  }
+  function handleSwitchSubtab(subId) {
+    setTab(subId);
+    setLastSubtab((prev) => ({ ...prev, [category]: subId }));
+  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 pb-10">
-      <div className="max-w-3xl mx-auto px-4 py-6">
+      <div className="max-w-3xl mx-auto px-4 pb-6" style={{ paddingTop: "max(1.5rem, calc(env(safe-area-inset-top) + 0.9rem))" }}>
         <header className="mb-5 flex items-start justify-between gap-3">
           <div>
             <h1 className="text-xl font-semibold flex items-center gap-2"><Icon name="wallet" size={20} className="text-slate-700" />Mis finanzas</h1>
@@ -1128,14 +1308,16 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
           </div>
         )}
 
-        <nav className="flex flex-wrap gap-1 mb-5 border-b border-slate-200 overflow-x-auto">
-          {tabs.map((t) => (
-            <button key={t.id} onClick={() => setTab(t.id)}
-              className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px whitespace-nowrap transition-colors ${tab === t.id ? "border-slate-900 text-slate-900" : "border-transparent text-slate-500 hover:text-slate-700"}`}>
-              {t.label}
+        <nav className="flex gap-1 mb-5 border-b border-slate-200">
+          {CATEGORIES.map((c) => (
+            <button key={c.id} onClick={() => handleSwitchCategory(c.id)}
+              className={`flex-1 px-3 py-2 text-sm font-medium border-b-2 -mb-px whitespace-nowrap transition-colors ${category === c.id ? "border-slate-900 text-slate-900" : "border-transparent text-slate-500 hover:text-slate-700"}`}>
+              {c.label}
             </button>
           ))}
         </nav>
+
+        <SwipeViews views={currentCategory.subtabs} activeId={tab} onChange={handleSwitchSubtab}>
 
         {tab === "resumen" && (
           <div className="space-y-4">
@@ -1150,7 +1332,7 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
                 {miDeuda.deudorId === uid
                   ? <span>Le debés a <b>{personaName(miDeuda.acreedorId)}</b>: <b>{formatMoney(miDeuda.monto)}</b></span>
                   : <span><b>{personaName(miDeuda.deudorId)}</b> te debe: <b>{formatMoney(miDeuda.monto)}</b></span>}
-                {" "}<button onClick={() => setTab("deudas")} className="text-slate-500 underline">Ver</button>
+                {" "}<button onClick={() => handleSwitchSubtab("deudas")} className="text-slate-500 underline">Ver</button>
               </div>
             )}
 
@@ -1286,10 +1468,6 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
           </form>
         )}
 
-        {tab === "eventos" && (
-          <EventosSection fb={fb} uid={uid} personas={personas} eventos={eventos} setError={setError} />
-        )}
-
         {tab === "deudas" && (
           <div className="space-y-4">
             <div className="rounded-lg border border-slate-200 bg-white p-4">
@@ -1402,6 +1580,83 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
           </div>
         )}
 
+        {tab === "mensual" && (
+          <div className="space-y-4">
+            <LineChartCard
+              title="Gastos e ingresos por mes"
+              labels={analisisMensual.map((m) => m.mes)}
+              datasets={[
+                { label: "Gastos", data: analisisMensual.map((m) => m.gasto) },
+                { label: "Ingresos", data: analisisMensual.map((m) => m.ingreso) },
+              ]}
+              empty={analisisMensual.length < 2}
+              yFormatter={(v) => formatMoney(v)}
+            />
+            {analisisMensual.length < 2 && (
+              <p className="text-sm text-slate-400">Todavía no hay suficiente historial (se necesitan movimientos de al menos 2 meses distintos) para armar esta comparación.</p>
+            )}
+            {analisisMensual.length >= 2 && (
+              <div className="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
+                {analisisMensual.slice().reverse().map((m) => (
+                  <div key={m.mes} className="flex items-center justify-between px-4 py-2 text-sm">
+                    <span className="text-slate-500">{m.mes}</span>
+                    <span className="text-emerald-600">+{formatMoney(m.ingreso)}</span>
+                    <span className="text-red-600">-{formatMoney(m.gasto)}</span>
+                    <span className="font-medium">{formatMoney(round2(m.ingreso - m.gasto))}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+
+        {tab === "inversiones" && (
+          <div className="space-y-4">
+            {inversiones.cuentas.length === 0 ? (
+              <p className="text-sm text-slate-400">Todavía no tenés cuentas de inversión/ahorro (cualquier cuenta que no sea tu cuenta principal cuenta acá).</p>
+            ) : (
+              <>
+                <LineChartCard
+                  title="Ganancia/pérdida acumulada (monto, $)"
+                  labels={inversiones.fechas.map((f) => (f === "inicio" ? "Inicio" : f))}
+                  datasets={inversiones.cuentas.map((c) => ({ label: c.nombre, data: c.valores }))}
+                  empty={inversiones.fechas.length < 2}
+                  yFormatter={(v) => formatMoney(v)}
+                />
+                <LineChartCard
+                  title="Rendimiento compuesto (%)"
+                  labels={inversiones.fechas.map((f) => (f === "inicio" ? "Inicio" : f))}
+                  datasets={inversiones.cuentas.map((c) => ({ label: c.nombre, data: c.pctValores }))}
+                  empty={inversiones.fechas.length < 2}
+                  yFormatter={(v) => `${v}%`}
+                />
+                <div className="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
+                  <div className="px-4 py-2 text-xs font-medium text-slate-500 flex justify-between">
+                    <span className="w-1/4">Cuenta</span><span className="w-1/4 text-right">Ganancia neta</span><span className="w-1/4 text-right">Total período</span><span className="w-1/4 text-right">Anualizado</span>
+                  </div>
+                  {inversiones.cuentas.map((c) => (
+                    <div key={c.id} className="px-4 py-2.5 text-sm flex justify-between items-center">
+                      <span className="w-1/4 truncate font-medium">{c.nombre}</span>
+                      <span className={`w-1/4 text-right ${c.gananciaNeta >= 0 ? "text-emerald-600" : "text-red-600"}`}>{formatMoney(c.gananciaNeta)}</span>
+                      <span className={`w-1/4 text-right ${c.rendimientoPct >= 0 ? "text-emerald-600" : "text-red-600"}`}>{c.rendimientoPct}%</span>
+                      <span className={`w-1/4 text-right ${c.cagr === null ? "text-slate-400" : c.cagr >= 0 ? "text-emerald-600" : "text-red-600"}`}>{c.cagr === null ? "— (poco historial)" : `${c.cagr}%`}</span>
+                    </div>
+                  ))}
+                </div>
+                <p className="text-xs text-slate-400">"Total período" es el rendimiento compuesto (TWR) desde el primer movimiento. "Anualizado" lo lleva a una tasa equivalente por año (CAGR), para poder comparar cuentas con distinto tiempo de historial; solo se calcula con 30 días de historial o más.</p>
+                {inversiones.cuentas.some((c) => c.huboEventoSinBase) && (
+                  <p className="text-xs text-amber-600">Alguna cuenta tuvo un ajuste de ganancia/pérdida mientras su saldo (antes del ajuste) era 0 o negativo; ese evento se sumó a la ganancia en $, pero se excluyó del cálculo del % compuesto para no distorsionarlo.</p>
+                )}
+                <p className="text-xs text-slate-400">Las transferencias hacia o desde estas cuentas se tratan como aportes/retiros de capital y no cuentan como rendimiento. Solo los movimientos de ingreso/gasto cargados directamente en la cuenta (el ajuste de fin de período) se consideran ganancia o pérdida real. Montos nominales, no ajustados por inflación.</p>
+              </>
+            )}
+          </div>
+        )}
+
+        {tab === "eventos" && (
+          <EventosSection fb={fb} uid={uid} personas={personas} eventos={eventos} setError={setError} />
+        )}
+
         {tab === "historial" && (
           <div className="space-y-3">
             <div className="flex items-center gap-2">
@@ -1510,6 +1765,8 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
             <button type="submit" className="rounded-md bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-800">Guardar</button>
           </form>
         )}
+
+        </SwipeViews>
       </div>
     </div>
   );
