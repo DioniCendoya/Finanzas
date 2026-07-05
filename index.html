@@ -729,6 +729,7 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
   const eventos = eventosQ.items;
   const hasPending = misCuentasQ.pending || misCategoriasQ.pending || misTxQ.pending || compartidasQ.pending;
 
+  
   const [online, setOnline] = useState(navigator.onLine);
   useEffect(() => {
     const on = () => setOnline(true), off = () => setOnline(false);
