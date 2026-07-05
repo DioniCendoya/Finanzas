@@ -69,7 +69,7 @@ const firebaseConfig = {
 const { useState, useEffect, useMemo, useRef } = React;
 
 const TIPO = { INGRESO: "ingreso", GASTO: "gasto", TRANSFERENCIA: "transferencia" };
-const COLORS = ["#e11d48","#2563eb","#16a34a","#f59e0b","#7c3aed","#0891b2","#db2777","#65a30d","#ea580c","#4338ca","#0d9488","#78716c"];
+const COLORS = ["#0f172a","#334155","#64748b","#94a3b8","#0ea5e9","#6366f1","#a855f7","#ec4899","#f97316","#eab308","#22c55e","#14b8a6"];
 
 function uid(p) { return `${p}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`; }
 function todayStr() { return new Date().toISOString().slice(0, 10); }
@@ -78,6 +78,43 @@ function formatMoney(n) {
   return num.toLocaleString("es-AR", { style: "currency", currency: "ARS", maximumFractionDigits: 2 });
 }
 function round2(n) { return Math.round((Number(n) + Number.EPSILON) * 100) / 100; }
+function genId(p) { return `${p}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`; }
+
+// Simplificación de deudas (algoritmo greedy: empareja al que más debe con el que
+// más le deben). Produce a lo sumo n-1 transferencias. No garantiza el mínimo
+// teórico absoluto (ese problema es NP-difícil), pero para grupos chicos es óptimo
+// en la práctica.
+function simplifyDebts(balances) {
+  const acreedores = balances.filter((b) => b.net > 0.005).map((b) => ({ id: b.id, val: b.net }));
+  const deudores = balances.filter((b) => b.net < -0.005).map((b) => ({ id: b.id, val: -b.net }));
+  acreedores.sort((a, b) => b.val - a.val);
+  deudores.sort((a, b) => b.val - a.val);
+  const txs = [];
+  let i = 0, j = 0;
+  while (i < deudores.length && j < acreedores.length) {
+    const pago = round2(Math.min(deudores[i].val, acreedores[j].val));
+    if (pago > 0.005) txs.push({ de: deudores[i].id, a: acreedores[j].id, monto: pago });
+    deudores[i].val = round2(deudores[i].val - pago);
+    acreedores[j].val = round2(acreedores[j].val - pago);
+    if (deudores[i].val <= 0.005) i++;
+    if (acreedores[j].val <= 0.005) j++;
+  }
+  return txs;
+}
+
+// Dado un evento, calcula cuánto pagó y cuánto consumió cada persona, su balance
+// neto (pagado - consumido) y la liquidación simplificada.
+function computeEvento(evento) {
+  const porPersona = {};
+  (evento.personas || []).forEach((p) => { porPersona[p.id] = { id: p.id, nombre: p.nombre, uid: p.uid || null, pagado: 0, consumido: 0 }; });
+  (evento.gastos || []).forEach((g) => {
+    if (porPersona[g.pagadoPor]) porPersona[g.pagadoPor].pagado = round2(porPersona[g.pagadoPor].pagado + Number(g.monto));
+    (g.participantes || []).forEach((pt) => { if (porPersona[pt.pid]) porPersona[pt.pid].consumido = round2(porPersona[pt.pid].consumido + Number(pt.monto)); });
+  });
+  const balances = Object.values(porPersona).map((v) => ({ ...v, net: round2(v.pagado - v.consumido) }));
+  const liquidacion = simplifyDebts(balances);
+  return { balances, liquidacion };
+}
 
 function getPeriodRange(preset, customStart, customEnd) {
   const now = new Date();
@@ -107,6 +144,10 @@ function Icon({ name, size = 15, className = "" }) {
     scale: <path d="M12 3v18M5 8l-3 6a4 4 0 008 0l-3-6zm14 0l-3 6a4 4 0 008 0l-3-6zM5 8h4M15 8h4M9 3h6" />,
     chart: <path d="M3 3v18h18M8 17V9m5 8V5m5 12v-6" />,
     alert: <path d="M12 9v4m0 4h.01M10.29 3.86 1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z" />,
+    back: <path d="M19 12H5M12 19l-7-7 7-7" />,
+    share: <path d="M4 12v8a2 2 0 002 2h12a2 2 0 002-2v-8M16 6l-4-4-4 4M12 2v13" />,
+    calendar: <path d="M8 2v4M16 2v4M3 10h18M5 4h14a2 2 0 012 2v14a2 2 0 01-2 2H5a2 2 0 01-2-2V6a2 2 0 012-2z" />,
+    check: <path d="M20 6 9 17l-5-5" />,
   };
   return (
     <svg width={size} height={size} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"
@@ -161,43 +202,6 @@ function PieChartCard({ title, data, onSelectSlice }) {
     <div className="rounded-lg border border-slate-200 bg-white p-4">
       <div className="text-sm font-medium mb-3">{title}</div>
       {data.length ? <div className="max-w-[280px] mx-auto"><canvas ref={canvasRef}></canvas></div> : <p className="text-sm text-slate-400">Sin datos en este período.</p>}
-    </div>
-  );
-}
-
-function LineChartCard({ title, labels, datasets, empty, yFormatter }) {
-  const canvasRef = useRef(null);
-  const chartRef = useRef(null);
-  useEffect(() => {
-    if (!canvasRef.current || !window.Chart) return;
-    if (chartRef.current) chartRef.current.destroy();
-    if (empty) return;
-    const ctx = canvasRef.current.getContext("2d");
-    chartRef.current = new Chart(ctx, {
-      type: "line",
-      data: {
-        labels,
-        datasets: datasets.map((d, i) => ({
-          label: d.label, data: d.data, borderColor: COLORS[i % COLORS.length],
-          backgroundColor: COLORS[i % COLORS.length], tension: 0.25, pointRadius: 2, spanGaps: true,
-        })),
-      },
-      options: {
-        interaction: { mode: "index", intersect: false },
-        plugins: { legend: { position: "bottom", labels: { boxWidth: 11, font: { size: 11 } } } },
-        scales: {
-          y: { ticks: { callback: (v) => (yFormatter ? yFormatter(v) : v), font: { size: 10 } } },
-          x: { ticks: { font: { size: 10 }, maxRotation: 45, minRotation: 0 } },
-        },
-      },
-    });
-    return () => { if (chartRef.current) chartRef.current.destroy(); };
-  }, [labels, datasets, empty]);
-
-  return (
-    <div className="rounded-lg border border-slate-200 bg-white p-4">
-      <div className="text-sm font-medium mb-3">{title}</div>
-      {empty ? <p className="text-sm text-slate-400">Sin datos suficientes todavía.</p> : <div className="h-64"><canvas ref={canvasRef}></canvas></div>}
     </div>
   );
 }
@@ -337,54 +341,371 @@ function TransactionList({ items, accountName, personaName, categoryName, onDele
   );
 }
 
-// Envoltorio que detecta swipe horizontal (touch) para moverse entre las
-// "ventanas" de una misma categoría, con indicadores clicleables como respaldo.
-function SwipeViews({ views, activeId, onChange, children }) {
-  const startX = useRef(null);
-  const startY = useRef(null);
-  const dragging = useRef(false);
-  const activeIndex = Math.max(0, views.findIndex((v) => v.id === activeId));
+// ============================ EVENTOS ============================
+// Un evento es una herramienta de reparto autocontenida: sus personas (con o sin
+// app) y sus gastos viven dentro del propio documento del evento. Al finalizar se
+// congela la liquidación y, para cada persona que sí usa la app, se guarda su
+// "share" (lo que consumió). Cada usuario se carga su propio gasto desde su cliente
+// (ver efecto en FinanceApp), así ninguno escribe transacciones del otro.
 
-  function onTouchStart(e) {
-    startX.current = e.touches[0].clientX;
-    startY.current = e.touches[0].clientY;
-    dragging.current = true;
+function EventosSection({ fb, uid, personas, eventos, setError }) {
+  const [selId, setSelId] = useState(null);
+  const [nuevoNombre, setNuevoNombre] = useState("");
+  const evento = eventos.find((e) => e.id === selId) || null;
+
+  const abiertos = eventos.filter((e) => !e.finalizado).sort((a, b) => (b.creadoEnMs || 0) - (a.creadoEnMs || 0));
+  const finalizados = eventos.filter((e) => e.finalizado).sort((a, b) => (b.finalizadoEnMs || 0) - (a.finalizadoEnMs || 0));
+
+  async function patchEvento(id, data) {
+    try { await fb.updateDoc(fb.doc(fb.db, "eventos", id), data); }
+    catch { setError("No se pudo guardar el evento (queda pendiente si estás sin conexión)."); }
   }
-  function onTouchEnd(e) {
-    if (!dragging.current || startX.current == null) return;
-    dragging.current = false;
-    const dx = e.changedTouches[0].clientX - startX.current;
-    const dy = e.changedTouches[0].clientY - startY.current;
-    const THRESHOLD = 45;
-    if (Math.abs(dx) > THRESHOLD && Math.abs(dx) > Math.abs(dy)) {
-      if (dx < 0 && activeIndex < views.length - 1) onChange(views[activeIndex + 1].id);
-      else if (dx > 0 && activeIndex > 0) onChange(views[activeIndex - 1].id);
-    }
-    startX.current = null;
+  async function borrarEvento(id) {
+    if (!window.confirm("¿Borrar este evento? No se puede deshacer.")) return;
+    try { await fb.deleteDoc(fb.doc(fb.db, "eventos", id)); if (selId === id) setSelId(null); }
+    catch { setError("No se pudo borrar el evento."); }
+  }
+  async function crearEvento(e) {
+    e.preventDefault();
+    setError("");
+    if (!nuevoNombre.trim()) return setError("Ponele un nombre al evento.");
+    const yo = personas.find((p) => p.id === uid);
+    const personasIni = yo ? [{ id: uid, nombre: yo.nombre, uid }] : [];
+    try {
+      const ref = await fb.addDoc(fb.collection(fb.db, "eventos"), {
+        nombre: nuevoNombre.trim(), creadoPor: uid, creadoEnMs: Date.now(),
+        finalizado: false, personas: personasIni, gastos: [],
+      });
+      setNuevoNombre(""); setSelId(ref.id);
+    } catch { setError("No se pudo crear el evento."); }
+  }
+
+  if (evento) {
+    return <EventoDetalle fb={fb} uid={uid} personas={personas} evento={evento} setError={setError} onBack={() => setSelId(null)} patchEvento={patchEvento} onBorrar={() => borrarEvento(evento.id)} />;
   }
 
   return (
-    <div>
-      {views.length > 1 && (
-        <div className="flex items-center justify-center gap-3 mb-4 flex-wrap">
-          {views.map((v) => (
-            <button key={v.id} onClick={() => onChange(v.id)}
-              className={`flex items-center gap-1.5 text-xs font-medium px-2 py-1 rounded-full transition-colors ${
-                v.id === activeId ? "bg-slate-900 text-white" : "text-slate-400 hover:text-slate-600"}`}>
-              {v.label}
-            </button>
-          ))}
+    <div className="space-y-4">
+      <form onSubmit={crearEvento} className="rounded-lg border border-slate-200 bg-white p-4 flex gap-2 items-end">
+        <div className="flex-1">
+          <label className="block text-xs font-medium text-slate-500 mb-1">Nuevo evento</label>
+          <input type="text" value={nuevoNombre} onChange={(e) => setNuevoNombre(e.target.value)} placeholder="Ej: Asado, viaje a la costa..." className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
+        </div>
+        <button type="submit" className="flex items-center gap-1.5 rounded-md bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-800"><Icon name="plus" size={14} />Crear</button>
+      </form>
+
+      {abiertos.length > 0 && (
+        <div>
+          <div className="text-sm font-medium text-slate-700 mb-2">Eventos abiertos</div>
+          <div className="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
+            {abiertos.map((e) => (
+              <button key={e.id} onClick={() => setSelId(e.id)} className="w-full text-left px-4 py-3 hover:bg-slate-50 flex items-center justify-between gap-2">
+                <span className="text-sm font-medium truncate">{e.nombre}</span>
+                <span className="text-xs text-slate-400 shrink-0">{(e.personas || []).length} pers · {(e.gastos || []).length} gasto{(e.gastos || []).length === 1 ? "" : "s"}</span>
+              </button>
+            ))}
+          </div>
         </div>
       )}
-      <div onTouchStart={onTouchStart} onTouchEnd={onTouchEnd}>
-        {children}
+
+      <div>
+        <div className="text-sm font-medium text-slate-700 mb-2">Historial de eventos</div>
+        {finalizados.length === 0 ? <p className="text-sm text-slate-400">Todavía no finalizaste ningún evento.</p> : (
+          <div className="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
+            {finalizados.map((e) => (
+              <button key={e.id} onClick={() => setSelId(e.id)} className="w-full text-left px-4 py-3 hover:bg-slate-50 flex items-center justify-between gap-2">
+                <span className="text-sm font-medium truncate flex items-center gap-1.5"><Icon name="check" size={13} className="text-emerald-500" />{e.nombre}</span>
+                <span className="text-xs text-slate-400 shrink-0">{e.finalizadoEnMs ? new Date(e.finalizadoEnMs).toLocaleDateString("es-AR") : ""}</span>
+              </button>
+            ))}
+          </div>
+        )}
       </div>
-      {views.length > 1 && (
-        <div className="flex items-center justify-center gap-1.5 mt-4">
-          {views.map((v) => (
-            <span key={v.id} className={`h-1.5 rounded-full transition-all ${v.id === activeId ? "w-5 bg-slate-900" : "w-1.5 bg-slate-300"}`} />
-          ))}
+    </div>
+  );
+}
+
+function EventoDetalle({ fb, uid, personas, evento, setError, onBack, patchEvento, onBorrar }) {
+  const finalizado = !!evento.finalizado;
+  const personasEvento = evento.personas || [];
+  const gastos = evento.gastos || [];
+
+  const { balances, liquidacion } = useMemo(() => computeEvento(evento), [evento]);
+  const nombreDe = (id) => (personasEvento.find((p) => p.id === id)?.nombre || "—");
+
+  // ----- alta de personas -----
+  const [extNombre, setExtNombre] = useState("");
+  const appDisponibles = personas.filter((p) => !personasEvento.some((pe) => pe.uid === p.id));
+
+  function agregarApp(p) {
+    if (finalizado) return;
+    if (personasEvento.some((pe) => pe.uid === p.id)) return;
+    patchEvento(evento.id, { personas: [...personasEvento, { id: p.id, nombre: p.nombre, uid: p.id }] });
+  }
+  function agregarExterna(e) {
+    e.preventDefault();
+    if (finalizado || !extNombre.trim()) return;
+    patchEvento(evento.id, { personas: [...personasEvento, { id: genId("ext"), nombre: extNombre.trim(), uid: null }] });
+    setExtNombre("");
+  }
+  function quitarPersona(pid) {
+    const usada = gastos.some((g) => g.pagadoPor === pid || (g.participantes || []).some((pt) => pt.pid === pid));
+    if (usada) return setError("No se puede quitar: participa en algún gasto.");
+    patchEvento(evento.id, { personas: personasEvento.filter((p) => p.id !== pid) });
+  }
+
+  // ----- alta de gastos -----
+  const [gDesc, setGDesc] = useState("");
+  const [gMonto, setGMonto] = useState("");
+  const [gFecha, setGFecha] = useState(todayStr());
+  const [gPagadoPor, setGPagadoPor] = useState("");
+  const [gModo, setGModo] = useState("igual");
+  const [gParts, setGParts] = useState({});
+
+  useEffect(() => {
+    setGParts((prev) => {
+      const next = {};
+      personasEvento.forEach((p) => { next[p.id] = prev[p.id] || { on: true, monto: "" }; });
+      return next;
+    });
+  }, [personasEvento.length]);
+  useEffect(() => { if (!gPagadoPor && personasEvento.length) setGPagadoPor(personasEvento[0].id); }, [personasEvento.length]);
+
+  const checkedPids = personasEvento.filter((p) => gParts[p.id]?.on).map((p) => p.id);
+
+  useEffect(() => {
+    if (gModo !== "igual") return;
+    const total = Number(gMonto) || 0;
+    const n = checkedPids.length;
+    setGParts((prev) => {
+      const next = { ...prev };
+      let acc = 0;
+      checkedPids.forEach((pid, i) => {
+        const base = n ? round2(total / n) : 0;
+        const m = i === n - 1 ? round2(total - acc) : base;
+        acc = round2(acc + m);
+        next[pid] = { on: true, monto: n && total ? String(m) : "" };
+      });
+      personasEvento.forEach((p) => { if (!checkedPids.includes(p.id)) next[p.id] = { on: false, monto: "" }; });
+      return next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [gMonto, checkedPids.join(","), gModo]);
+
+  function toggleParticipante(pid) { setGParts((prev) => ({ ...prev, [pid]: { ...prev[pid], on: !prev[pid]?.on } })); }
+  function setMontoManual(pid, val) { setGModo("manual"); setGParts((prev) => ({ ...prev, [pid]: { on: true, monto: val } })); }
+
+  const sumaParts = round2(checkedPids.reduce((s, pid) => s + (Number(gParts[pid]?.monto) || 0), 0));
+  const totalNum = Number(gMonto) || 0;
+
+  function agregarGasto(e) {
+    e.preventDefault();
+    setError("");
+    if (!totalNum || totalNum <= 0) return setError("El monto del gasto tiene que ser mayor a cero.");
+    if (!gPagadoPor) return setError("Elegí quién pagó.");
+    if (!checkedPids.length) return setError("Elegí al menos una persona en el gasto.");
+    if (Math.abs(sumaParts - totalNum) > 0.01) return setError(`Las partes suman ${formatMoney(sumaParts)} y el total es ${formatMoney(totalNum)}.`);
+    const participantes = checkedPids.map((pid) => ({ pid, monto: round2(Number(gParts[pid]?.monto) || 0) }));
+    const nuevo = { id: genId("g"), descripcion: gDesc.trim(), monto: round2(totalNum), fecha: gFecha || todayStr(), pagadoPor: gPagadoPor, participantes };
+    patchEvento(evento.id, { gastos: [...gastos, nuevo] });
+    setGDesc(""); setGMonto(""); setGFecha(todayStr()); setGModo("igual");
+  }
+  function quitarGasto(gid) { patchEvento(evento.id, { gastos: gastos.filter((g) => g.id !== gid) }); }
+
+  function finalizar() {
+    setError("");
+    if (!gastos.length) return setError("Agregá al menos un gasto antes de finalizar.");
+    if (!window.confirm("Al finalizar, el evento queda de solo lectura y a cada persona de la app se le carga su parte para categorizar. ¿Confirmás?")) return;
+    const { balances: b, liquidacion: liq } = computeEvento(evento);
+    const sharesPorUid = {};
+    b.forEach((x) => { if (x.uid) sharesPorUid[x.uid] = x.consumido; });
+    patchEvento(evento.id, { finalizado: true, finalizadoEnMs: Date.now(), liquidacion: liq, balances: b, sharesPorUid });
+  }
+
+  function compartirImagen() {
+    const dpr = Math.max(2, window.devicePixelRatio || 1);
+    const W = 620, pad = 28, rowH = 46;
+    const filas = Math.max(1, liquidacion.length);
+    const H = 150 + filas * rowH + 24;
+    const c = document.createElement("canvas");
+    c.width = W * dpr; c.height = H * dpr;
+    const ctx = c.getContext("2d"); ctx.scale(dpr, dpr);
+    ctx.fillStyle = "#ffffff"; ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = "#0f172a"; ctx.font = "600 26px -apple-system,Helvetica,Arial";
+    ctx.fillText(evento.nombre, pad, 50);
+    ctx.fillStyle = "#64748b"; ctx.font = "14px -apple-system,Helvetica,Arial";
+    const fecha = evento.finalizadoEnMs ? new Date(evento.finalizadoEnMs).toLocaleDateString("es-AR") : new Date().toLocaleDateString("es-AR");
+    ctx.fillText("Cómo saldar las cuentas · " + fecha, pad, 76);
+    ctx.strokeStyle = "#e2e8f0"; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(pad, 100); ctx.lineTo(W - pad, 100); ctx.stroke();
+    let y = 140;
+    if (!liquidacion.length) {
+      ctx.fillStyle = "#334155"; ctx.font = "16px -apple-system,Helvetica,Arial";
+      ctx.fillText("Todo saldado, nadie debe nada.", pad, y);
+    } else {
+      liquidacion.forEach((t) => {
+        ctx.fillStyle = "#334155"; ctx.font = "16px -apple-system,Helvetica,Arial"; ctx.textAlign = "left";
+        ctx.fillText(`${nombreDe(t.de)}  →  ${nombreDe(t.a)}`, pad, y);
+        ctx.fillStyle = "#0f172a"; ctx.font = "600 16px -apple-system,Helvetica,Arial"; ctx.textAlign = "right";
+        ctx.fillText(formatMoney(t.monto), W - pad, y); ctx.textAlign = "left";
+        y += rowH;
+      });
+    }
+    c.toBlob(async (blob) => {
+      if (!blob) return;
+      const file = new File([blob], `${evento.nombre}.png`, { type: "image/png" });
+      try {
+        if (navigator.canShare && navigator.canShare({ files: [file] })) { await navigator.share({ files: [file], title: evento.nombre }); return; }
+      } catch (e) {}
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a"); a.href = url; a.download = `${evento.nombre}.png`;
+      document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+    }, "image/png");
+  }
+
+  return (
+    <div className="space-y-4">
+      <div className="flex items-center justify-between gap-2">
+        <button onClick={onBack} className="flex items-center gap-1.5 text-sm text-slate-500 hover:text-slate-800"><Icon name="back" size={15} />Eventos</button>
+        {finalizado
+          ? <span className="text-[10px] uppercase tracking-wide bg-emerald-50 text-emerald-600 px-2 py-1 rounded flex items-center gap-1"><Icon name="check" size={11} />Finalizado</span>
+          : <button onClick={onBorrar} className="text-slate-300 hover:text-red-500" title="Borrar evento"><Icon name="trash" size={15} /></button>}
+      </div>
+
+      <div>
+        <h2 className="text-lg font-semibold">{evento.nombre}</h2>
+        {finalizado && <p className="text-xs text-slate-400">Finalizado el {evento.finalizadoEnMs ? new Date(evento.finalizadoEnMs).toLocaleDateString("es-AR") : ""}</p>}
+      </div>
+
+      {/* Liquidación */}
+      <div className="rounded-lg border border-slate-200 bg-white p-4">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2 text-sm font-medium text-slate-700"><Icon name="scale" size={16} />{finalizado ? "Cómo saldar las cuentas" : "Vista previa de la liquidación"}</div>
+          {finalizado && <button onClick={compartirImagen} className="flex items-center gap-1.5 text-xs rounded-md bg-slate-900 text-white px-3 py-1.5 font-medium hover:bg-slate-800"><Icon name="share" size={13} />Compartir imagen</button>}
         </div>
+        {liquidacion.length === 0 ? (
+          <p className="text-sm text-slate-500">{gastos.length ? "Todo saldado, nadie debe nada." : "Cargá gastos para ver quién le debe a quién."}</p>
+        ) : (
+          <div className="space-y-1.5">
+            {liquidacion.map((t, i) => (
+              <div key={i} className="flex items-center justify-between text-sm">
+                <span><span className="font-medium">{nombreDe(t.de)}</span> le debe a <span className="font-medium">{nombreDe(t.a)}</span></span>
+                <span className="font-semibold">{formatMoney(t.monto)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Personas */}
+      <div className="rounded-lg border border-slate-200 bg-white p-4 space-y-3">
+        <div className="flex items-center gap-2 text-sm font-medium text-slate-700"><Icon name="users" size={16} />Personas ({personasEvento.length})</div>
+        <div className="flex flex-wrap gap-2">
+          {personasEvento.map((p) => (
+            <span key={p.id} className="inline-flex items-center gap-1.5 text-sm bg-slate-100 rounded-full pl-3 pr-2 py-1">
+              {p.nombre}{p.uid && <span className="text-[9px] uppercase tracking-wide text-indigo-500">app</span>}
+              {!finalizado && <button onClick={() => quitarPersona(p.id)} className="text-slate-400 hover:text-red-500"><Icon name="x" size={12} /></button>}
+            </span>
+          ))}
+          {personasEvento.length === 0 && <span className="text-xs text-slate-400">Sin personas todavía.</span>}
+        </div>
+        {!finalizado && (
+          <div className="space-y-2 border-t border-slate-100 pt-3">
+            {appDisponibles.length > 0 && (
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="text-xs text-slate-500">Agregar de la app:</span>
+                {appDisponibles.map((p) => (
+                  <button key={p.id} onClick={() => agregarApp(p)} className="text-xs rounded-full border border-slate-200 px-2.5 py-1 hover:border-slate-400">+ {p.nombre}</button>
+                ))}
+              </div>
+            )}
+            <form onSubmit={agregarExterna} className="flex gap-2">
+              <input type="text" value={extNombre} onChange={(e) => setExtNombre(e.target.value)} placeholder="Agregar persona (sin app)" className="flex-1 rounded-md border border-slate-200 px-3 py-1.5 text-sm" />
+              <button type="submit" className="text-sm rounded-md border border-slate-200 px-3 py-1.5 hover:border-slate-400">Agregar</button>
+            </form>
+          </div>
+        )}
+      </div>
+
+      {/* Alta de gasto */}
+      {!finalizado && personasEvento.length > 0 && (
+        <form onSubmit={agregarGasto} className="rounded-lg border border-slate-200 bg-white p-4 space-y-4">
+          <div className="text-sm font-medium text-slate-700">Nuevo gasto</div>
+          <div className="grid gap-3 sm:grid-cols-2">
+            <div>
+              <label className="block text-xs font-medium text-slate-500 mb-1">Monto total</label>
+              <input type="number" step="0.01" min="0" value={gMonto} onChange={(e) => setGMonto(e.target.value)} placeholder="0.00" className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-500 mb-1">¿Quién pagó?</label>
+              <select value={gPagadoPor} onChange={(e) => setGPagadoPor(e.target.value)} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm">
+                {personasEvento.map((p) => <option key={p.id} value={p.id}>{p.nombre}</option>)}
+              </select>
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-500 mb-1">Fecha</label>
+              <input type="date" value={gFecha} onChange={(e) => setGFecha(e.target.value)} className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
+            </div>
+            <div>
+              <label className="block text-xs font-medium text-slate-500 mb-1">Descripción (opcional)</label>
+              <input type="text" value={gDesc} onChange={(e) => setGDesc(e.target.value)} placeholder="Ej: carne, nafta..." className="w-full rounded-md border border-slate-200 px-3 py-2 text-sm" />
+            </div>
+          </div>
+
+          <div className="border-t border-slate-100 pt-3">
+            <div className="flex items-center justify-between mb-2">
+              <span className="text-xs font-medium text-slate-500">¿Entre quiénes se divide?</span>
+              <button type="button" onClick={() => setGModo("igual")} className={`text-xs underline ${gModo === "igual" ? "text-slate-400" : "text-slate-600"}`}>Partes iguales</button>
+            </div>
+            <div className="space-y-1.5">
+              {personasEvento.map((p) => {
+                const on = !!gParts[p.id]?.on;
+                return (
+                  <div key={p.id} className="flex items-center gap-3">
+                    <label className="flex items-center gap-2 flex-1 min-w-0">
+                      <input type="checkbox" checked={on} onChange={() => toggleParticipante(p.id)} className="rounded" />
+                      <span className={`text-sm truncate ${on ? "" : "text-slate-400"}`}>{p.nombre}</span>
+                    </label>
+                    <input type="number" step="0.01" min="0" disabled={!on} value={on ? (gParts[p.id]?.monto ?? "") : ""} onChange={(e) => setMontoManual(p.id, e.target.value)} placeholder="0.00" className="w-24 rounded-md border border-slate-200 px-2 py-1.5 text-sm disabled:bg-slate-50 disabled:text-slate-300" />
+                  </div>
+                );
+              })}
+            </div>
+            <div className={`text-xs mt-2 ${Math.abs(sumaParts - totalNum) > 0.01 && totalNum ? "text-red-500" : "text-slate-400"}`}>
+              Suma de partes: {formatMoney(sumaParts)}{totalNum ? ` / total ${formatMoney(totalNum)}` : ""}
+            </div>
+          </div>
+
+          <button type="submit" className="w-full sm:w-auto flex items-center justify-center gap-1.5 rounded-md bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-800"><Icon name="plus" size={14} />Agregar gasto</button>
+        </form>
+      )}
+
+      {/* Lista de gastos */}
+      <div>
+        <div className="text-sm font-medium text-slate-700 mb-2">Gastos del evento ({gastos.length})</div>
+        {gastos.length === 0 ? <p className="text-sm text-slate-400">Todavía no cargaste gastos.</p> : (
+          <div className="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
+            {gastos.slice().sort((a, b) => (a.fecha < b.fecha ? 1 : -1)).map((g) => (
+              <div key={g.id} className="px-4 py-3">
+                <div className="flex items-center justify-between gap-2 text-sm">
+                  <span className="font-medium truncate">{g.descripcion || "Gasto"}</span>
+                  <div className="flex items-center gap-3 shrink-0">
+                    <span className="font-semibold">{formatMoney(g.monto)}</span>
+                    {!finalizado && <button onClick={() => quitarGasto(g.id)} className="text-slate-300 hover:text-red-500"><Icon name="trash" size={14} /></button>}
+                  </div>
+                </div>
+                <div className="text-xs text-slate-400 mt-0.5">
+                  {g.fecha} · Pagó {nombreDe(g.pagadoPor)} · {(g.participantes || []).map((pt) => `${nombreDe(pt.pid)} ${formatMoney(pt.monto)}`).join(" · ")}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Finalizar */}
+      {!finalizado && (
+        <button onClick={finalizar} disabled={!gastos.length} className="w-full flex items-center justify-center gap-1.5 rounded-md bg-slate-900 text-white px-4 py-2.5 text-sm font-medium hover:bg-slate-800 disabled:opacity-40"><Icon name="check" size={15} />Finalizar evento</button>
       )}
     </div>
   );
@@ -397,6 +718,7 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
   const misTxQ = useLiveQuery(fb, () => fb.query(fb.collection(fb.db, "transacciones"), fb.where("personaId", "==", uid)), [uid]);
   const compartidasQ = useLiveQuery(fb, () => fb.query(fb.collection(fb.db, "transacciones"), fb.where("esCompartido", "==", true)), []);
   const liquidacionesQ = useLiveQuery(fb, () => fb.collection(fb.db, "liquidaciones"), []);
+  const eventosQ = useLiveQuery(fb, () => fb.collection(fb.db, "eventos"), []);
 
   const misCuentas = misCuentasQ.items;
   const principalesAjenas = principalesQ.items.filter((a) => a.personaId !== uid);
@@ -404,6 +726,7 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
   const misTransacciones = misTxQ.items;
   const compartidas = compartidasQ.items;
   const liquidaciones = liquidacionesQ.items;
+  const eventos = eventosQ.items;
   const hasPending = misCuentasQ.pending || misCategoriasQ.pending || misTxQ.pending || compartidasQ.pending;
 
   const [online, setOnline] = useState(navigator.onLine);
@@ -413,9 +736,33 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
     return () => { window.removeEventListener("online", on); window.removeEventListener("offline", off); };
   }, []);
 
+  // Auto-carga de la parte propia de eventos finalizados. Cada usuario crea SOLO su
+  // propia transacción (id determinístico => idempotente, nunca duplica), sin tocar
+  // las del otro. Queda sin categoría para que aparezca en el flujo "sin categorizar".
+  const eventoLoadRef = useRef(new Set());
+  useEffect(() => {
+    if (!eventosQ.loaded || !misTxQ.loaded) return;
+    const principal = misCuentas.find((a) => a.esPrincipal);
+    eventos.forEach((evt) => {
+      if (!evt.finalizado || !evt.sharesPorUid) return;
+      const share = Number(evt.sharesPorUid[uid]) || 0;
+      if (share <= 0) return;
+      const txId = `evt_${evt.id}_${uid}`;
+      if (misTransacciones.some((t) => t.id === txId) || eventoLoadRef.current.has(txId)) return;
+      if (!principal) return;
+      eventoLoadRef.current.add(txId);
+      fb.setDoc(fb.doc(fb.db, "transacciones", txId), {
+        tipo: TIPO.GASTO, cuentaId: principal.id, personaId: uid, esCompartido: false,
+        cuentaDestinoId: null, categoriaId: null, monto: round2(share),
+        descripcion: `Evento: ${evt.nombre}`,
+        fecha: evt.finalizadoEnMs ? new Date(evt.finalizadoEnMs).toISOString().slice(0, 10) : todayStr(),
+        eventoId: evt.id, creadoEnMs: Date.now(),
+      }).catch(() => { eventoLoadRef.current.delete(txId); });
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [eventos, misTransacciones, misCuentas, eventosQ.loaded, misTxQ.loaded, uid]);
+
   const [tab, setTab] = useState("resumen");
-  const [category, setCategory] = useState("metricas");
-  const [lastSubtab, setLastSubtab] = useState({ metricas: "resumen", movimiento: "movimiento", gestion: "cuentas" });
   const [error, setError] = useState("");
   const [filterAccount, setFilterAccount] = useState("todas");
 
@@ -679,88 +1026,6 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
     return { total, porTipo, ingresosPeriodo, pct: ingresosPeriodo > 0 ? round2((total / ingresosPeriodo) * 100) : null };
   }, [misCuentas, misTransacciones, periodo]);
 
-  // ---------- análisis mensual (gastos e ingresos por mes) ----------
-  const analisisMensual = useMemo(() => {
-    const map = {};
-    misTransacciones.forEach((t) => {
-      if (t.tipo !== TIPO.GASTO && t.tipo !== TIPO.INGRESO) return;
-      const mes = (t.fecha || "").slice(0, 7);
-      if (!mes) return;
-      if (!map[mes]) map[mes] = { mes, gasto: 0, ingreso: 0 };
-      map[mes][t.tipo === TIPO.GASTO ? "gasto" : "ingreso"] = round2(map[mes][t.tipo === TIPO.GASTO ? "gasto" : "ingreso"] + Number(t.monto));
-    });
-    return Object.values(map).sort((a, b) => (a.mes < b.mes ? -1 : 1));
-  }, [misTransacciones]);
-
-  // ---------- rendimiento de inversiones (cuentas no principales) ----------
-  // Criterio: las TRANSFERENCIAS hacia/desde la cuenta son aportes o retiros de
-  // capital (no generan rendimiento, solo cambian la base). Los movimientos de
-  // tipo ingreso/gasto cargados directamente en la cuenta representan la
-  // ganancia o pérdida real del período, y se componen entre sí para armar un
-  // índice comparable entre cuentas independientemente de cuánto capital tengan.
-  const inversiones = useMemo(() => {
-    const cuentasInv = misCuentas.filter((a) => !a.esPrincipal);
-    const series = cuentasInv.map((a) => {
-      const movs = misTransacciones
-        .filter((t) => t.cuentaId === a.id || t.cuentaDestinoId === a.id)
-        .slice()
-        .sort((x, y) => (x.fecha < y.fecha ? -1 : 1));
-      let saldo = Number(a.saldoInicial) || 0;
-      let gananciaAcumulada = 0;
-      let indice = 100;
-      let huboEventoSinBase = false;
-      const puntos = [{ fecha: "inicio", saldo, gananciaAcumulada, indice }];
-      movs.forEach((t) => {
-        if (t.tipo === TIPO.TRANSFERENCIA) {
-          // Aporte o retiro de capital: mueve el saldo, no es rendimiento.
-          if (t.cuentaId === a.id) saldo -= Number(t.monto);
-          if (t.cuentaDestinoId === a.id) saldo += Number(t.monto);
-        } else if (t.tipo === TIPO.INGRESO || t.tipo === TIPO.GASTO) {
-          // Ajuste de fin de período: ganancia o pérdida real generada por la inversión.
-          const monto = Number(t.monto) * (t.tipo === TIPO.GASTO ? -1 : 1);
-          const saldoAntes = saldo;
-          saldo += monto;
-          gananciaAcumulada = round2(gananciaAcumulada + monto);
-          if (saldoAntes > 0) indice = round2(indice * (1 + monto / saldoAntes));
-          else huboEventoSinBase = true;
-        }
-        saldo = round2(saldo);
-        puntos.push({ fecha: t.fecha, saldo, gananciaAcumulada, indice });
-      });
-      const inicial = Number(a.saldoInicial) || 0;
-      const actual = balances[a.id] || 0;
-      const rendimientoPct = round2(indice - 100);
-      const primeraFecha = movs.length ? movs[0].fecha : null;
-      let dias = null, cagr = null;
-      if (primeraFecha) {
-        dias = Math.round((new Date(todayStr()) - new Date(primeraFecha)) / 86400000);
-        if (dias >= 30 && indice > 0) cagr = round2((Math.pow(indice / 100, 365 / dias) - 1) * 100);
-      }
-      return { id: a.id, nombre: a.nombre, tipo: a.tipo, inicial, actual, gananciaNeta: gananciaAcumulada, rendimientoPct, cagr, dias, huboEventoSinBase, puntos };
-    });
-    const fechasSet = new Set(["inicio"]);
-    series.forEach((s) => s.puntos.forEach((p) => fechasSet.add(p.fecha)));
-    const fechas = Array.from(fechasSet).sort((a, b) => (a === "inicio" ? -1 : b === "inicio" ? 1 : a < b ? -1 : 1));
-    const seriesAlineadas = series.map((s) => {
-      const porFecha = {};
-      s.puntos.forEach((p) => { porFecha[p.fecha] = p; });
-      let ultimo = s.puntos[0];
-      let empezo = false;
-      const valores = [], pctValores = [];
-      fechas.forEach((f) => {
-        if (!empezo) {
-          if (f !== s.primeraFecha) { valores.push(null); pctValores.push(null); return; }
-          empezo = true;
-        }
-        if (f in porFecha) ultimo = porFecha[f];
-        valores.push(ultimo.gananciaAcumulada);
-        pctValores.push(ultimo.indice - 100);
-      });
-      return { ...s, valores, pctValores };
-    });
-    return { cuentas: seriesAlineadas, fechas };
-  }, [misCuentas, misTransacciones, balances]);
-
   // ---------- deudas ----------
   const ultimaLiquidacion = useMemo(() => {
     if (!liquidaciones.length) return null;
@@ -822,39 +1087,22 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
 
   const miDeuda = paresDeuda.find((p) => p.deudorId === uid || p.acreedorId === uid);
 
-  const CATEGORIES = [
-    { id: "metricas", label: "Métricas", subtabs: [
-      { id: "metricas", label: "General" },
-      { id: "mensual", label: "Por mes" },
-      { id: "inversiones", label: "Inversiones" },
-      { id: "resumen", label: "Resumen" },
-      { id: "deudas", label: "Deudas" },
-    ] },
-    { id: "movimiento", label: "Movimiento", subtabs: [
-      { id: "movimiento", label: "Nuevo movimiento" },
-      { id: "compartido", label: "Gasto compartido" },
-      { id: "historial", label: "Historial" },
-    ] },
-    { id: "gestion", label: "Gestión", subtabs: [
-      { id: "cuentas", label: "Cuentas" },
-      { id: "categorias", label: "Categorías" },
-      { id: "perfil", label: "Perfil" },
-    ] },
+  const tabs = [
+    { id: "resumen", label: "Resumen" },
+    { id: "movimiento", label: "Movimiento" },
+    { id: "compartido", label: "Gasto compartido" },
+    { id: "eventos", label: "Eventos" },
+    { id: "deudas", label: "Deudas" },
+    { id: "metricas", label: "Métricas" },
+    { id: "historial", label: "Historial" },
+    { id: "cuentas", label: "Cuentas" },
+    { id: "categorias", label: "Categorías" },
+    { id: "perfil", label: "Perfil" },
   ];
-  const currentCategory = CATEGORIES.find((c) => c.id === category) || CATEGORIES[0];
-
-  function handleSwitchCategory(catId) {
-    setCategory(catId);
-    setTab(lastSubtab[catId] || CATEGORIES.find((c) => c.id === catId).subtabs[0].id);
-  }
-  function handleSwitchSubtab(subId) {
-    setTab(subId);
-    setLastSubtab((prev) => ({ ...prev, [category]: subId }));
-  }
 
   return (
     <div className="min-h-screen bg-slate-50 text-slate-900 pb-10">
-      <div className="max-w-3xl mx-auto px-4 pb-6" style={{ paddingTop: "max(1.5rem, calc(env(safe-area-inset-top) + 0.9rem))" }}>
+      <div className="max-w-3xl mx-auto px-4 py-6">
         <header className="mb-5 flex items-start justify-between gap-3">
           <div>
             <h1 className="text-xl font-semibold flex items-center gap-2"><Icon name="wallet" size={20} className="text-slate-700" />Mis finanzas</h1>
@@ -880,23 +1128,21 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
           </div>
         )}
 
-        <nav className="flex gap-1 mb-5 border-b border-slate-200">
-          {CATEGORIES.map((c) => (
-            <button key={c.id} onClick={() => handleSwitchCategory(c.id)}
-              className={`flex-1 px-3 py-2 text-sm font-medium border-b-2 -mb-px whitespace-nowrap transition-colors ${category === c.id ? "border-slate-900 text-slate-900" : "border-transparent text-slate-500 hover:text-slate-700"}`}>
-              {c.label}
+        <nav className="flex flex-wrap gap-1 mb-5 border-b border-slate-200 overflow-x-auto">
+          {tabs.map((t) => (
+            <button key={t.id} onClick={() => setTab(t.id)}
+              className={`px-3 py-2 text-sm font-medium border-b-2 -mb-px whitespace-nowrap transition-colors ${tab === t.id ? "border-slate-900 text-slate-900" : "border-transparent text-slate-500 hover:text-slate-700"}`}>
+              {t.label}
             </button>
           ))}
         </nav>
-
-        <SwipeViews views={currentCategory.subtabs} activeId={tab} onChange={handleSwitchSubtab}>
 
         {tab === "resumen" && (
           <div className="space-y-4">
             {pendientesCategoria.length > 0 && (
               <div className="rounded-lg border border-amber-200 bg-amber-50 p-3 flex items-start gap-2 text-sm text-amber-800">
                 <Icon name="alert" size={16} className="shrink-0 mt-0.5" />
-                <span>Tenés {pendientesCategoria.length} gasto{pendientesCategoria.length > 1 ? "s" : ""} compartido{pendientesCategoria.length > 1 ? "s" : ""} sin categorizar. Elegí tu categoría en la lista de abajo.</span>
+                <span>Tenés {pendientesCategoria.length} gasto{pendientesCategoria.length > 1 ? "s" : ""} sin categorizar (compartidos o de eventos). Elegí tu categoría en la lista de abajo.</span>
               </div>
             )}
             {miDeuda && (
@@ -904,7 +1150,7 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
                 {miDeuda.deudorId === uid
                   ? <span>Le debés a <b>{personaName(miDeuda.acreedorId)}</b>: <b>{formatMoney(miDeuda.monto)}</b></span>
                   : <span><b>{personaName(miDeuda.deudorId)}</b> te debe: <b>{formatMoney(miDeuda.monto)}</b></span>}
-                {" "}<button onClick={() => handleSwitchSubtab("deudas")} className="text-slate-500 underline">Ver</button>
+                {" "}<button onClick={() => setTab("deudas")} className="text-slate-500 underline">Ver</button>
               </div>
             )}
 
@@ -1040,6 +1286,10 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
           </form>
         )}
 
+        {tab === "eventos" && (
+          <EventosSection fb={fb} uid={uid} personas={personas} eventos={eventos} setError={setError} />
+        )}
+
         {tab === "deudas" && (
           <div className="space-y-4">
             <div className="rounded-lg border border-slate-200 bg-white p-4">
@@ -1152,79 +1402,6 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
           </div>
         )}
 
-        {tab === "mensual" && (
-          <div className="space-y-4">
-            <LineChartCard
-              title="Gastos e ingresos por mes"
-              labels={analisisMensual.map((m) => m.mes)}
-              datasets={[
-                { label: "Gastos", data: analisisMensual.map((m) => m.gasto) },
-                { label: "Ingresos", data: analisisMensual.map((m) => m.ingreso) },
-              ]}
-              empty={analisisMensual.length < 2}
-              yFormatter={(v) => formatMoney(v)}
-            />
-            {analisisMensual.length < 2 && (
-              <p className="text-sm text-slate-400">Todavía no hay suficiente historial (se necesitan movimientos de al menos 2 meses distintos) para armar esta comparación.</p>
-            )}
-            {analisisMensual.length >= 2 && (
-              <div className="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
-                {analisisMensual.slice().reverse().map((m) => (
-                  <div key={m.mes} className="flex items-center justify-between px-4 py-2 text-sm">
-                    <span className="text-slate-500">{m.mes}</span>
-                    <span className="text-emerald-600">+{formatMoney(m.ingreso)}</span>
-                    <span className="text-red-600">-{formatMoney(m.gasto)}</span>
-                    <span className="font-medium">{formatMoney(round2(m.ingreso - m.gasto))}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        )}
-
-        {tab === "inversiones" && (
-          <div className="space-y-4">
-            {inversiones.cuentas.length === 0 ? (
-              <p className="text-sm text-slate-400">Todavía no tenés cuentas de inversión/ahorro (cualquier cuenta que no sea tu cuenta principal cuenta acá).</p>
-            ) : (
-              <>
-                <LineChartCard
-                  title="Ganancia/pérdida acumulada (monto, $)"
-                  labels={inversiones.fechas.map((f) => (f === "inicio" ? "Inicio" : f))}
-                  datasets={inversiones.cuentas.map((c) => ({ label: c.nombre, data: c.valores }))}
-                  empty={inversiones.fechas.length < 2}
-                  yFormatter={(v) => formatMoney(v)}
-                />
-                <LineChartCard
-                  title="Rendimiento compuesto (%)"
-                  labels={inversiones.fechas.map((f) => (f === "inicio" ? "Inicio" : f))}
-                  datasets={inversiones.cuentas.map((c) => ({ label: c.nombre, data: c.pctValores }))}
-                  empty={inversiones.fechas.length < 2}
-                  yFormatter={(v) => `${v}%`}
-                />
-                <div className="rounded-lg border border-slate-200 bg-white divide-y divide-slate-100">
-                  <div className="px-4 py-2 text-xs font-medium text-slate-500 flex justify-between">
-                    <span className="w-1/4">Cuenta</span><span className="w-1/4 text-right">Ganancia neta</span><span className="w-1/4 text-right">Total período</span><span className="w-1/4 text-right">Anualizado</span>
-                  </div>
-                  {inversiones.cuentas.map((c) => (
-                    <div key={c.id} className="px-4 py-2.5 text-sm flex justify-between items-center">
-                      <span className="w-1/4 truncate font-medium">{c.nombre}</span>
-                      <span className={`w-1/4 text-right ${c.gananciaNeta >= 0 ? "text-emerald-600" : "text-red-600"}`}>{formatMoney(c.gananciaNeta)}</span>
-                      <span className={`w-1/4 text-right ${c.rendimientoPct >= 0 ? "text-emerald-600" : "text-red-600"}`}>{c.rendimientoPct}%</span>
-                      <span className={`w-1/4 text-right ${c.cagr === null ? "text-slate-400" : c.cagr >= 0 ? "text-emerald-600" : "text-red-600"}`}>{c.cagr === null ? "— (poco historial)" : `${c.cagr}%`}</span>
-                    </div>
-                  ))}
-                </div>
-                <p className="text-xs text-slate-400">"Total período" es el rendimiento compuesto (TWR) desde el primer movimiento. "Anualizado" lo lleva a una tasa equivalente por año (CAGR), para poder comparar cuentas con distinto tiempo de historial; solo se calcula con 30 días de historial o más.</p>
-                {inversiones.cuentas.some((c) => c.huboEventoSinBase) && (
-                  <p className="text-xs text-amber-600">Alguna cuenta tuvo un ajuste de ganancia/pérdida mientras su saldo (antes del ajuste) era 0 o negativo; ese evento se sumó a la ganancia en $, pero se excluyó del cálculo del % compuesto para no distorsionarlo.</p>
-                )}
-                <p className="text-xs text-slate-400">Las transferencias hacia o desde estas cuentas se tratan como aportes/retiros de capital y no cuentan como rendimiento. Solo los movimientos de ingreso/gasto cargados directamente en la cuenta (el ajuste de fin de período) se consideran ganancia o pérdida real. Montos nominales, no ajustados por inflación.</p>
-              </>
-            )}
-          </div>
-        )}
-
         {tab === "historial" && (
           <div className="space-y-3">
             <div className="flex items-center gap-2">
@@ -1333,8 +1510,6 @@ function FinanceApp({ fb, uid, personas, miNombre }) {
             <button type="submit" className="rounded-md bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-800">Guardar</button>
           </form>
         )}
-
-        </SwipeViews>
       </div>
     </div>
   );
